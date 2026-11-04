@@ -1,0 +1,22 @@
+[package]
+name = "vusb"
+description = "Virtual USB devices: a device model contract, class shells (HID, CDC-ACM, FTDI, EZ-USB), and the hosts that put a model on the bus (USB/IP with vhci-hcd, in-process)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../README.md"
+keywords = ["usb", "usbip", "emulation", "testing", "virtual-device"]
+categories = ["hardware-support", "development-tools::testing", "emulators"]
+
+[features]
+default = ["usbip"]
+# The USB/IP server and the vhci-hcd attach path.
+usbip = []
+
+[dependencies]
+
+[lints]
+workspace = true
