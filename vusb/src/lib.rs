@@ -10,13 +10,17 @@
 //! requests every USB device answers (descriptors, configuration,
 //! status, halts) and the checks on what the host sends. [`shells`]
 //! carry what every device of a kind shares (HID, CDC-ACM, FTDI, the
-//! EZ-USB FX2 boot loader). [`transport::usbip`] is the USB/IP server
-//! the Linux `vhci-hcd` module connects to, and [`attach::vhci`]
-//! attaches and detaches through its sysfs files, so no `usbip` tool is
-//! needed. Everything the host does goes to the [`observer::Observer`]s
-//! a host is given: one call per completed transfer, one per violation
-//! of the protocol as the model defines it, and notices such as a
-//! renumeration the model asks for or an armed [`arm::Event`] firing.
+//! EZ-USB FX2 boot loader). [`bus::Bus`] is the host controller around
+//! a device: it holds the transfers the device NAKs, keeps each
+//! endpoint's order, and cuts a babble, whatever carries the transfers;
+//! a test drives it directly ([`host::enumerate`]). [`transport::usbip`]
+//! is the USB/IP server the Linux `vhci-hcd` module connects to, and
+//! [`attach::vhci`] attaches and detaches through its sysfs files, so
+//! no `usbip` tool is needed. Everything the host does goes to the
+//! [`observer::Observer`]s the bus is given: one call per completed
+//! transfer, one per violation of the protocol as the model defines
+//! it, and notices such as a renumeration the model asks for or an
+//! armed [`arm::Event`] firing.
 //!
 //! Only Linux can attach the device; the models, shells and the
 //! protocol code build and test everywhere.
@@ -24,9 +28,11 @@
 #![forbid(unsafe_code)]
 
 pub mod arm;
+pub mod bus;
 pub mod descriptor;
 pub mod device;
 pub mod examples;
+pub mod host;
 pub mod model;
 pub mod observer;
 pub mod options;

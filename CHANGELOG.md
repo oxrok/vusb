@@ -11,3 +11,8 @@
   transfer of an endpoint, or when the model marks its point.
 - `Device` answers `GET_DESCRIPTOR` of the device qualifier for high speed
   devices.
+- `Bus`: the host controller around a device, shared by every transport
+  and by in-process tests: held transfers, per-endpoint order, bulk
+  packet rounding, babble, unlink with held data, armed events, the
+  renumeration signal. The USB/IP server is a codec on top of it.
+- `host::enumerate`: enumerates a device on a `Bus` as a host does.

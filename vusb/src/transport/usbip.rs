@@ -9,35 +9,32 @@
 //! with `RET_UNLINK`. All header fields are big endian; a setup packet
 //! is carried as its eight bytes.
 //!
-//! A transfer the model answers with NAK stays pending here, as a URB
-//! does in a host controller, and is offered to the model again after
-//! every other transfer and every 20 ms, until it completes or the
-//! client unlinks it. Transfers on one endpoint complete in the order
-//! they were submitted: one submitted behind a held one waits behind
-//! it, as a host controller's queue for the endpoint would.
+//! The server is a codec: it turns PDUs into [`Bus`] submissions and
+//! unlinks, and the bus's completions into PDUs. What a host controller
+//! does (holding a transfer answered NAK and offering it again after every
+//! other transfer and every 20 ms, keeping each endpoint's order,
+//! cutting a babble) is the bus's.
 //!
 //! When the model asks to renumerate
 //! ([`crate::model::DeviceModel::take_renumeration`]), the server tells
 //! whoever drives the run through the channel given to
 //! [`Server::on_renumeration`]; that side detaches the device and
-//! imports it again, and the new import resets the device, which takes
+//! imports it again, and the new import resets the bus, which takes
 //! over the model's new descriptors.
 //!
-//! Every transfer, violation and notice goes to the server's
-//! [`Observer`]s ([`Server::with_observer`]).
+//! Every transfer, violation and notice goes to the bus's observers.
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
 use crate::arm::Event;
-use crate::device::Device;
-use crate::model::{CONTROL, Descriptors, Endpoint, Reply, Setup, Speed, Violations};
-use crate::observer::{Notice, Observer, Outcome, SharedObserver, Transfer};
+use crate::bus::{Bus, Completion, Renumeration, Signal, Status, Step, Unlink, Urb};
+use crate::model::{Descriptors, Setup, Speed};
 use crate::{Error, Result};
 
 /// The protocol version.
@@ -49,22 +46,6 @@ pub fn speed_code(speed: Speed) -> u32 {
         Speed::Low => 1,
         Speed::Full => 2,
         Speed::High => 3,
-    }
-}
-
-/// A renumeration the model asked for: the ids it comes back with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Renumeration {
-    /// `idVendor` after it.
-    pub vendor: u16,
-    /// `idProduct` after it.
-    pub product: u16,
-}
-
-/// Passes a comment to every observer.
-fn comment_all(observers: &[SharedObserver], message: &str) {
-    for o in observers {
-        o.lock().expect("observer lock").notice(Notice::Comment(message));
     }
 }
 
@@ -144,9 +125,9 @@ fn op_header(code: u16, status: u32) -> Vec<u8> {
     b
 }
 
-/// A submitted URB, held or in flight.
+/// A `CMD_SUBMIT` as it came off the wire.
 #[derive(Clone, Debug)]
-struct Urb {
+struct Submit {
     seqnum: u32,
     devid: u32,
     direction: u32,
@@ -157,8 +138,24 @@ struct Urb {
     data: Vec<u8>,
 }
 
+impl Submit {
+    /// The bus's view of it.
+    fn urb(self) -> Urb {
+        let setup = (self.ep == 0).then(|| Setup::from_bytes(&self.setup));
+        Urb {
+            seqnum: self.seqnum,
+            ep: self.ep,
+            is_in: setup.map_or(self.direction == DIR_IN, Setup::is_in),
+            setup,
+            length: self.length,
+            data: self.data,
+            iso_packets: u32::try_from(self.packets).unwrap_or(0),
+        }
+    }
+}
+
 enum Pdu {
-    Submit(Urb),
+    Submit(Submit),
     Unlink { seqnum: u32, target: u32 },
 }
 
@@ -187,7 +184,7 @@ fn read_pdus(mut stream: TcpStream, tx: &mpsc::Sender<Pdu>) -> io::Result<()> {
                 }
                 let mut setup = [0u8; 8];
                 setup.copy_from_slice(&h[40..48]);
-                Pdu::Submit(Urb {
+                Pdu::Submit(Submit {
                     seqnum,
                     devid: be32(&h[8..12]),
                     direction,
@@ -212,6 +209,16 @@ fn read_pdus(mut stream: TcpStream, tx: &mpsc::Sender<Pdu>) -> io::Result<()> {
     }
 }
 
+/// The `RET_SUBMIT` status of a completion.
+fn errno(status: Status) -> i32 {
+    match status {
+        Status::Ok => 0,
+        Status::Stall => EPIPE,
+        Status::Babble => EOVERFLOW,
+        Status::Unlinked => ECONNRESET,
+    }
+}
+
 fn write_ret_submit(
     out: &mut TcpStream,
     seqnum: u32,
@@ -230,6 +237,10 @@ fn write_ret_submit(
     out.write_all(&b)
 }
 
+fn write_completion(out: &mut TcpStream, c: &Completion) -> io::Result<()> {
+    write_ret_submit(out, c.seqnum, errno(c.status), c.actual, &c.data)
+}
+
 fn write_ret_unlink(out: &mut TcpStream, seqnum: u32, status: i32) -> io::Result<()> {
     let mut b = Vec::with_capacity(HEADER);
     b.extend_from_slice(&RET_UNLINK.to_be_bytes());
@@ -240,12 +251,11 @@ fn write_ret_unlink(out: &mut TcpStream, seqnum: u32, status: i32) -> io::Result
     out.write_all(&b)
 }
 
-/// The server: one device, one connection at a time. The device is
-/// shared with whoever drives the run, so its model can be replaced
-/// between runs (see [`Device::replace_model`]).
+/// The server: one device, one connection at a time. The bus is shared
+/// with whoever drives the run, so its model can be replaced between
+/// runs ([`Bus::replace_model`]) and events armed ([`Bus::arm`]).
 pub struct Server {
-    device: Arc<Mutex<Device>>,
-    observers: Vec<SharedObserver>,
+    bus: Arc<Mutex<Bus>>,
     busid: String,
     busnum: u32,
     devnum: u32,
@@ -254,63 +264,39 @@ pub struct Server {
 }
 
 impl Server {
-    /// A server for `device`, exported under `busid`; `busnum` and
-    /// `devnum` are what the client is told, and form the `devid` of
-    /// every URB (`busnum << 16 | devnum`).
-    pub fn new(device: Arc<Mutex<Device>>, busid: &str, busnum: u32, devnum: u32) -> Server {
-        Server {
-            device,
-            observers: Vec::new(),
-            busid: busid.to_owned(),
-            busnum,
-            devnum,
-            renumeration: None,
-            events: None,
-        }
-    }
-
-    /// An observer of everything the host does; several are called in
-    /// the order given.
-    #[must_use]
-    pub fn with_observer(mut self, observer: SharedObserver) -> Server {
-        self.observers.push(observer);
-        self
+    /// A server for the device on `bus`, exported under `busid`;
+    /// `busnum` and `devnum` are what the client is told, and form the
+    /// `devid` of every URB (`busnum << 16 | devnum`).
+    pub fn new(bus: Arc<Mutex<Bus>>, busid: &str, busnum: u32, devnum: u32) -> Server {
+        Server { bus, busid: busid.to_owned(), busnum, devnum, renumeration: None, events: None }
     }
 
     /// Where a renumeration request of the model is sent: one message
     /// per request, after the transfer that caused it was answered and
-    /// the observers got their [`Notice::Renumeration`].
+    /// the observers got their notice. Without one, the device stays as
+    /// it is.
     #[must_use]
     pub fn on_renumeration(mut self, tx: mpsc::Sender<Renumeration>) -> Server {
         self.renumeration = Some(tx);
         self
     }
 
-    /// Where an armed event that fired is sent
-    /// ([`crate::device::Device::arm`]), after the observers got their
-    /// [`Notice::Fired`]. Once an unplug fired, the server answers
-    /// nothing more on the connection: the transfers the host submits
-    /// until the device is detached are dropped (a comment each), as a
-    /// device that is gone answers nothing.
+    /// Where an armed event that fired is sent ([`Bus::arm`]), after the
+    /// observers got their notice. Once an unplug fired, the bus answers
+    /// nothing more: the transfers the host submits until the device is
+    /// detached are dropped, as a device that is gone answers nothing.
     #[must_use]
     pub fn on_event(mut self, tx: mpsc::Sender<Event>) -> Server {
         self.events = Some(tx);
         self
     }
 
-    fn device(&self) -> std::sync::MutexGuard<'_, Device> {
-        self.device.lock().expect("device lock")
-    }
-
-    /// Calls `f` on every observer, in order.
-    fn observe(&self, f: impl Fn(&mut dyn Observer)) {
-        for o in &self.observers {
-            f(&mut *o.lock().expect("observer lock"));
-        }
+    fn bus(&self) -> MutexGuard<'_, Bus> {
+        self.bus.lock().expect("bus lock")
     }
 
     fn comment(&self, message: &str) {
-        comment_all(&self.observers, message);
+        self.bus().comment(message);
     }
 
     /// The `devid` the client must use.
@@ -321,7 +307,8 @@ impl Server {
     /// The device's `usbip_usb_device` record; its path is
     /// `/vusb/NAME`.
     pub fn record(&self) -> Vec<u8> {
-        let device = self.device();
+        let bus = self.bus();
+        let device = bus.device();
         let path = format!("/vusb/{}", device.name());
         device_record(device.descriptors(), &path, &self.busid, self.busnum, self.devnum)
     }
@@ -356,8 +343,8 @@ impl Server {
                 let mut b = op_header(OP_REP_DEVLIST, 0);
                 b.extend_from_slice(&1u32.to_be_bytes());
                 b.extend(self.record());
-                let device = self.device();
-                if let Some(config) = device.descriptors().configs.first() {
+                let bus = self.bus();
+                if let Some(config) = bus.device().descriptors().configs.first() {
                     for i in Descriptors::interfaces(config) {
                         if i[1] == 0 {
                             b.extend_from_slice(&[i[2], i[3], i[4], 0]);
@@ -381,7 +368,7 @@ impl Server {
                 b.extend(self.record());
                 stream.write_all(&b)?;
                 self.comment(&format!("{want} imported"));
-                self.device().reset();
+                self.bus().reset();
                 self.urbs(stream, stop)
             }
             other => {
@@ -394,320 +381,73 @@ impl Server {
     fn urbs(&mut self, stream: TcpStream, stop: &AtomicBool) -> io::Result<()> {
         let reader = stream.try_clone()?;
         let (tx, rx) = mpsc::channel();
-        let observers = self.observers.clone();
+        let bus = Arc::clone(&self.bus);
         thread::spawn(move || {
             if let Err(e) = read_pdus(reader, &tx) {
-                comment_all(&observers, &format!("reader stopped: {e}"));
+                bus.lock().expect("bus lock").comment(&format!("reader stopped: {e}"));
             }
         });
         let mut out = stream;
-        let mut held: Vec<Urb> = Vec::new();
-        let mut gone = false;
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
             match rx.recv_timeout(TICK) {
-                Ok(Pdu::Submit(urb)) if gone => {
-                    self.comment(&format!(
-                        "seq {}: ep {:#04x} {} dropped, the device is unplugged",
-                        urb.seqnum,
-                        urb.ep,
-                        dir_word(urb.direction)
-                    ));
-                }
-                Ok(Pdu::Submit(urb)) => {
-                    if urb.ep != 0 && urb.direction == DIR_IN {
-                        // The URB's own length, as the host submitted it
-                        // (not rounded to the packet size as for the
-                        // model's in_transfer(): see in_length()).
-                        self.device().in_submitted(urb.ep, urb.length);
-                    }
-                    let queued = urb.ep != 0
-                        && held.iter().any(|u| u.ep == urb.ep && u.direction == urb.direction);
-                    if queued {
-                        // Behind a held transfer of the same endpoint.
-                        self.comment(&format!(
-                            "seq {}: ep {:#04x} {} queued behind a held transfer",
-                            urb.seqnum,
-                            urb.ep,
-                            dir_word(urb.direction)
+                Ok(Pdu::Submit(submit)) => {
+                    if submit.devid != self.devid() {
+                        self.bus().violation(&format!(
+                            "URB for devid {:#010x}, the device is {:#010x}",
+                            submit.devid,
+                            self.devid()
                         ));
-                        held.push(urb);
-                    } else {
-                        let (reply, v) = self.perform(&urb);
-                        let event = self.fired(&urb, &reply);
-                        self.finish(&mut out, urb, reply, v, &mut held, true)?;
-                        self.check_renumeration();
-                        gone |= self.event_fired(event, &mut held);
                     }
+                    let produced = self.bus().submit(submit.urb());
+                    self.deliver(&mut out, produced)?;
                 }
                 Ok(Pdu::Unlink { seqnum, target }) => {
-                    let found = held.iter().position(|u| u.seqnum == target);
-                    let mut status = 0;
-                    if let Some(i) = found {
-                        // Only the oldest of its endpoint has received
-                        // anything; nusb cancels the newest first.
-                        let (ep, dir) = (held[i].ep, held[i].direction);
-                        let oldest =
-                            held.iter().position(|u| u.ep == ep && u.direction == dir) == Some(i);
-                        let u = held.remove(i);
-                        self.comment(&format!(
-                            "unlink seq {target}: ep {:#04x} {} held",
-                            u.ep,
-                            dir_word(u.direction)
-                        ));
-                        status = ECONNRESET;
-                        // Packets it holds already: its RET_SUBMIT with
-                        // them goes first, so the unlink finds it completed.
-                        if oldest && self.complete_unlinked(&mut out, &u)? {
-                            status = 0;
+                    let status = match self.bus().unlink(target) {
+                        Unlink::NotHeld => 0,
+                        Unlink::Cancelled => ECONNRESET,
+                        Unlink::Completed(c) => {
+                            // Its RET_SUBMIT goes first, so the unlink
+                            // finds it completed.
+                            write_completion(&mut out, &c)?;
+                            0
                         }
-                    } else {
-                        self.comment(&format!("unlink seq {target}: already completed"));
-                    }
+                    };
                     write_ret_unlink(&mut out, seqnum, status)?;
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
-            let pending = std::mem::take(&mut held);
-            // Endpoints whose oldest transfer is still held this round:
-            // the transfers behind it wait.
-            let mut blocked: Vec<(u8, u32)> = Vec::new();
-            for urb in pending {
-                let key = (urb.ep, urb.direction);
-                if gone {
-                    break;
-                }
-                if urb.ep != 0 && blocked.contains(&key) {
-                    held.push(urb);
-                    continue;
-                }
-                let (reply, v) = self.perform(&urb);
-                if reply == Reply::Nak {
-                    blocked.push(key);
-                }
-                let event = self.fired(&urb, &reply);
-                self.finish(&mut out, urb, reply, v, &mut held, false)?;
-                self.check_renumeration();
-                gone |= self.event_fired(event, &mut held);
+            let produced = self.bus().poll();
+            self.deliver(&mut out, produced)?;
+        }
+    }
+
+    /// Answers the completions of a step and passes its signals on.
+    fn deliver(&self, out: &mut TcpStream, step: Step) -> io::Result<()> {
+        for c in &step.completions {
+            write_completion(out, c)?;
+        }
+        for signal in step.signals {
+            match signal {
+                Signal::Renumeration(r) => match &self.renumeration {
+                    Some(tx) => {
+                        let _ = tx.send(r);
+                    }
+                    None => self.comment("nobody to renumerate the device; it stays as it is"),
+                },
+                Signal::Fired(event) => match &self.events {
+                    Some(tx) => {
+                        let _ = tx.send(event);
+                    }
+                    None => self.comment("an armed event fired; nobody to pass it to"),
+                },
             }
         }
+        Ok(())
     }
-
-    /// Whether the transfer just offered fires the armed event.
-    fn fired(&self, urb: &Urb, reply: &Reply) -> Option<Event> {
-        self.device().fired(urb.ep, urb.direction == DIR_IN, reply)
-    }
-
-    /// Tells the observers of an event that fired (right after the
-    /// transfer that fired it) and passes it on. Returns whether the
-    /// device is now gone; the held transfers are dropped then.
-    fn event_fired(&mut self, event: Option<Event>, held: &mut Vec<Urb>) -> bool {
-        let Some(event) = event else {
-            return false;
-        };
-        self.observe(|o| o.notice(Notice::Fired(&event)));
-        if let Some(tx) = &self.events {
-            let _ = tx.send(event.clone());
-        } else {
-            self.comment("an armed event fired; nobody to pass it to");
-        }
-        if event == Event::Unplug {
-            for u in held.drain(..) {
-                self.comment(&format!("seq {}: dropped, the device is unplugged", u.seqnum));
-            }
-            return true;
-        }
-        false
-    }
-
-    /// Passes a renumeration request of the model on. The observers get
-    /// the notice at once, right after the transfer that caused it (a
-    /// tool that ends right after the transfer would otherwise see it
-    /// or not depending on timing); what the host sends until the
-    /// detach follows.
-    fn check_renumeration(&mut self) {
-        if !self.device().take_renumeration() {
-            return;
-        }
-        let (vendor, product) = {
-            let d = self.device();
-            let m = d.model_descriptors();
-            (m.vendor_id(), m.product_id())
-        };
-        self.comment("the model asks to renumerate");
-        self.observe(|o| o.notice(Notice::Renumeration { vendor, product }));
-        let Some(tx) = &self.renumeration else {
-            self.comment("nobody to renumerate the device; it stays as it is");
-            return;
-        };
-        let _ = tx.send(Renumeration { vendor, product });
-    }
-
-    /// The length of an IN URB as the device sees it. A bulk IN asks
-    /// for whole packets: the host controller takes up to
-    /// `wMaxPacketSize` bytes per IN token whatever the URB's length, so
-    /// a device cannot tell a URB of 1 byte from one of 64 on a 64 byte
-    /// endpoint. libusb passes any length (a driver may
-    /// read 1 byte answers), nusb only multiples of the packet size;
-    /// the length is rounded up to the packet size for the model and the
-    /// log, so the two read the same. Interrupt and control INs keep
-    /// their length. The URB's own length still decides the outcome on
-    /// the host: an answer longer than it is a babble (`finish()`).
-    fn in_length(&self, urb: &Urb) -> usize {
-        let address = 0x80 | urb.ep;
-        match self.device().endpoint(address) {
-            Some(e) if e.transfer_type() == crate::model::BULK && e.max_packet > 0 => {
-                let mps = usize::from(e.max_packet);
-                urb.length.div_ceil(mps).max(1) * mps
-            }
-            _ => urb.length,
-        }
-    }
-
-    /// Offers a URB to the device.
-    fn perform(&mut self, urb: &Urb) -> (Reply, Violations) {
-        let mut v = Violations::default();
-        if urb.devid != self.devid() {
-            v.report(format!(
-                "URB for devid {:#010x}, the device is {:#010x}",
-                urb.devid,
-                self.devid()
-            ));
-        }
-        if urb.packets > 0 {
-            v.report(format!("isochronous URB with {} packets; not supported", urb.packets));
-            return (Reply::Stall, v);
-        }
-        let length = if urb.direction == DIR_IN { self.in_length(urb) } else { urb.length };
-        let mut device = self.device();
-        let reply = if urb.ep == 0 {
-            device.control(Setup::from_bytes(&urb.setup), &urb.data, &mut v)
-        } else if urb.direction == DIR_IN {
-            device.transfer_in(urb.ep, length, &mut v)
-        } else {
-            device.transfer_out(urb.ep, &urb.data, &mut v)
-        };
-        (reply, v)
-    }
-
-    /// A held IN transfer just unlinked: when the model says it holds
-    /// data ([`crate::model::DeviceModel::in_unlinked`]), reports it and
-    /// completes the URB with it. Whether it did.
-    fn complete_unlinked(&mut self, out: &mut TcpStream, urb: &Urb) -> io::Result<bool> {
-        if urb.direction != DIR_IN || urb.ep == 0 {
-            return Ok(false);
-        }
-        let length = self.in_length(urb);
-        let Some(d) = self.device().in_unlinked(urb.ep, length) else { return Ok(false) };
-        let address = 0x80 | urb.ep;
-        let transfer = Transfer {
-            seqnum: urb.seqnum,
-            endpoint: address,
-            kind: self.device().endpoint(address).map(Endpoint::transfer_type),
-            setup: None,
-            is_in: true,
-            requested: urb.length,
-            offered: length,
-            data: Vec::new(),
-            reply: Reply::Data(d.clone()),
-            outcome: Outcome::Unlinked,
-        };
-        self.observe(|o| o.transfer(&transfer));
-        let d = &d[..d.len().min(urb.length)];
-        write_ret_submit(out, urb.seqnum, ECONNRESET, d.len(), d)?;
-        Ok(true)
-    }
-
-    /// Reports the outcome and answers the client, or holds the URB;
-    /// `fresh` says the URB was just submitted rather than retried (a
-    /// retried URB the device still NAKs is not reported again).
-    fn finish(
-        &mut self,
-        out: &mut TcpStream,
-        urb: Urb,
-        reply: Reply,
-        mut v: Violations,
-        held: &mut Vec<Urb>,
-        fresh: bool,
-    ) -> io::Result<()> {
-        let control = urb.ep == 0;
-        let setup = control.then(|| Setup::from_bytes(&urb.setup));
-        let is_in = setup.map_or(urb.direction == DIR_IN, Setup::is_in);
-        let endpoint = if control {
-            0
-        } else if urb.direction == DIR_IN {
-            0x80 | urb.ep
-        } else {
-            urb.ep
-        };
-        let kind = if control {
-            Some(CONTROL)
-        } else {
-            self.device().endpoint(endpoint).map(Endpoint::transfer_type)
-        };
-        let offered =
-            if !control && urb.direction == DIR_IN { self.in_length(&urb) } else { urb.length };
-        let outcome = match &reply {
-            Reply::Nak => Outcome::Held,
-            Reply::Data(d) if !control && urb.direction == DIR_IN && d.len() > urb.length => {
-                Outcome::Babble
-            }
-            _ => Outcome::Completed,
-        };
-        let violations = v.drain();
-        self.observe(|o| {
-            for message in &violations {
-                o.violation(message);
-            }
-        });
-        if fresh || outcome != Outcome::Held {
-            let transfer = Transfer {
-                seqnum: urb.seqnum,
-                endpoint,
-                kind,
-                setup,
-                is_in,
-                requested: urb.length,
-                offered,
-                data: urb.data.clone(),
-                reply: reply.clone(),
-                outcome,
-            };
-            self.observe(|o| o.transfer(&transfer));
-        }
-        match reply {
-            Reply::Nak => {
-                held.push(urb);
-                Ok(())
-            }
-            Reply::Stall => write_ret_submit(out, urb.seqnum, EPIPE, 0, &[]),
-            Reply::Data(d) => {
-                if outcome == Outcome::Babble {
-                    // More than the URB holds: the HCD ends it with
-                    // -EOVERFLOW and the bytes that fit, as for a
-                    // babbling device.
-                    let d = &d[..urb.length];
-                    write_ret_submit(out, urb.seqnum, EOVERFLOW, d.len(), d)
-                } else if urb.direction == DIR_IN {
-                    // A control IN longer than wLength is cut, as the
-                    // model trait says.
-                    let d = &d[..d.len().min(urb.length)];
-                    write_ret_submit(out, urb.seqnum, 0, d.len(), d)
-                } else {
-                    let taken =
-                        if d.is_empty() { urb.data.len() } else { d.len().min(urb.data.len()) };
-                    write_ret_submit(out, urb.seqnum, 0, taken, &[])
-                }
-            }
-        }
-    }
-}
-
-fn dir_word(direction: u32) -> &'static str {
-    if direction == DIR_IN { "IN" } else { "OUT" }
 }
 
 /// Invalid-argument status, for callers that build their own replies.
@@ -809,30 +549,56 @@ pub fn read_ret(stream: &mut TcpStream, data_follows: bool) -> io::Result<Ret> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::Device;
     use crate::examples::relay::UsbRelay;
-    use crate::observer::Recorder;
+    use crate::model::{DeviceModel, Reply, Violations};
+    use crate::observer::{Outcome, Recorder, SharedObserver};
 
     fn setup(request_type: u8, request: u8, value: u16, index: u16, length: u16) -> Setup {
         Setup { request_type, request, value, index, length }
     }
 
-    #[test]
-    fn serves_a_relay_board_to_a_client() {
+    /// A server on a loopback port, with a recorder on its bus.
+    struct Served {
+        bus: Arc<Mutex<Bus>>,
+        rec: Arc<Mutex<Recorder>>,
+        devid: u32,
+        addr: SocketAddr,
+        stop: Arc<AtomicBool>,
+        handle: thread::JoinHandle<Result<()>>,
+    }
+
+    fn serve(model: Box<dyn DeviceModel>) -> Served {
         let rec = Arc::new(Mutex::new(Recorder::default()));
         let shared: SharedObserver = rec.clone();
-        let device = Arc::new(Mutex::new(Device::new(Box::new(UsbRelay::new(2)))));
-        let server = Server::new(Arc::clone(&device), "1-1", 1, 2).with_observer(shared);
+        let bus = Arc::new(Mutex::new(Bus::new(Device::new(model)).with_observer(shared)));
+        let server = Server::new(Arc::clone(&bus), "1-1", 1, 2);
         let devid = server.devid();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = Arc::clone(&stop);
         let handle = thread::spawn(move || server.run(&listener, &stop2));
+        Served { bus, rec, devid, addr, stop, handle }
+    }
 
-        assert!(import(addr, "9-9").is_err());
-        let (mut s, record) = import(addr, "1-1").unwrap();
+    impl Served {
+        fn stop(self) -> Arc<Mutex<Recorder>> {
+            self.stop.store(true, Ordering::Relaxed);
+            self.handle.join().unwrap().unwrap();
+            self.rec
+        }
+    }
+
+    #[test]
+    fn serves_a_relay_board_to_a_client() {
+        let served = serve(Box::new(UsbRelay::new(2)));
+        let devid = served.devid;
+        assert!(import(served.addr, "9-9").is_err());
+        let (mut s, record) = import(served.addr, "1-1").unwrap();
         assert_eq!(record.len(), DEVICE_RECORD);
         assert_eq!(&record[300..304], &[0x16, 0xc0, 0x05, 0xdf]);
+        assert!(record.starts_with(b"/vusb/usbrelay\0"));
 
         // Device descriptor.
         s.write_all(&cmd_submit(1, devid, DIR_IN, 0, 18, Some(setup(0x80, 6, 0x0100, 0, 18)), &[]))
@@ -861,7 +627,7 @@ mod tests {
             .unwrap();
         assert_eq!(read_ret(&mut s, true).unwrap().data, b"ABCDE\0\0\x02");
         // A fresh model behind the configured device: relays off again.
-        device.lock().unwrap().replace_model(Box::new(UsbRelay::new(2)));
+        served.bus.lock().unwrap().replace_model(Box::new(UsbRelay::new(2)));
         s.write_all(&cmd_submit(50, devid, DIR_IN, 0, 8, Some(setup(0xa1, 1, 0x0300, 0, 8)), &[]))
             .unwrap();
         assert_eq!(read_ret(&mut s, true).unwrap().data, b"ABCDE\0\0\0");
@@ -888,66 +654,30 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(read_ret(&mut s, true).unwrap().status, EPIPE);
+        // A URB for another device is answered, and flagged.
+        s.write_all(&cmd_submit(11, 7, DIR_IN, 0, 1, Some(setup(0x80, 8, 0, 0, 1)), &[])).unwrap();
+        assert_eq!(read_ret(&mut s, true).unwrap().data, vec![1]);
         drop(s);
-        stop.store(true, Ordering::Relaxed);
-        handle.join().unwrap().unwrap();
+        let rec = served.stop();
         let rec = rec.lock().unwrap();
-        assert!(rec.violations.is_empty(), "{:?}", rec.violations);
+        assert_eq!(rec.violations.len(), 1, "{:?}", rec.violations);
+        assert!(rec.violations[0].starts_with("URB for devid 0x00000007"));
         // The device descriptor fetch, as the observers saw it.
         let first = &rec.transfers[0];
-        assert_eq!(
-            (first.seqnum, first.endpoint, first.kind, first.is_in),
-            (1, 0, Some(CONTROL), true)
-        );
+        assert_eq!((first.seqnum, first.endpoint, first.is_in), (1, 0, true));
         assert_eq!(first.setup, Some(setup(0x80, 6, 0x0100, 0, 18)));
         assert_eq!((first.requested, first.offered, first.outcome), (18, 18, Outcome::Completed));
         // The interrupt IN was reported held once, never completed.
         let held: Vec<u32> =
             rec.transfers.iter().filter(|t| t.outcome == Outcome::Held).map(|t| t.seqnum).collect();
         assert_eq!(held, [6]);
-        assert!(rec.transfers.iter().all(|t| t.seqnum != 6 || t.outcome == Outcome::Held));
         assert!(rec.notices.iter().any(|n| n == "1-1 imported"), "{:?}", rec.notices);
-    }
-
-    /// Answers each IN with `answer` bytes and remembers the lengths it
-    /// was given: a bulk IN on 0x82 (64 byte packets), an interrupt IN
-    /// on 0x81 (8 byte packets).
-    struct Babbler {
-        descriptors: crate::model::Descriptors,
-        answer: usize,
-        asked: Asked,
-    }
-
-    /// Which call (`submitted` or `transfer`), the endpoint, the length.
-    type Asked = Arc<Mutex<Vec<(&'static str, u8, usize)>>>;
-
-    impl crate::model::DeviceModel for Babbler {
-        fn name(&self) -> &'static str {
-            "babbler"
-        }
-        fn descriptors(&self) -> &crate::model::Descriptors {
-            &self.descriptors
-        }
-        fn control(&mut self, _: Setup, _: &[u8], _: &mut Violations) -> Reply {
-            Reply::ack()
-        }
-        fn out(&mut self, _: u8, _: &[u8], _: &mut Violations) -> Reply {
-            Reply::ack()
-        }
-        fn in_transfer(&mut self, ep: u8, max: usize, _: &mut Violations) -> Reply {
-            self.asked.lock().unwrap().push(("transfer", ep, max));
-            Reply::Data(vec![0xa5; self.answer])
-        }
-        fn in_submitted(&mut self, ep: u8, max: usize) {
-            self.asked.lock().unwrap().push(("submitted", ep, max));
-        }
-        fn reset(&mut self) {}
     }
 
     /// Holds each bulk IN, and has 64 bytes for one that is unlinked.
     struct Holder(crate::model::Descriptors);
 
-    impl crate::model::DeviceModel for Holder {
+    impl DeviceModel for Holder {
         fn name(&self) -> &'static str {
             "holder"
         }
@@ -970,10 +700,10 @@ mod tests {
     }
 
     /// What a held queue has received is in its oldest URB, whichever is
-    /// unlinked first: nusb cancels the newest first, libusb's timeouts
-    /// the oldest.
+    /// unlinked first: its `RET_SUBMIT` with the data goes before the
+    /// `RET_UNLINK`.
     #[test]
-    fn only_the_oldest_held_urb_gets_what_the_device_holds() {
+    fn an_unlinked_urb_completes_with_what_the_device_holds() {
         use crate::descriptor::{self, DeviceDescriptor};
         let mut body = Vec::new();
         body.extend_from_slice(&descriptor::interface(0, 0, 1, [0xff, 0, 0], 0));
@@ -989,22 +719,14 @@ mod tests {
             configurations: 1,
         };
         let model = Holder(crate::model::Descriptors {
-            speed: crate::model::Speed::Full,
+            speed: Speed::Full,
             device: device.bytes(),
             configs: vec![descriptor::configuration(1, 0, 0x80, 50, &body)],
             strings: Vec::new(),
         });
-        let rec = Arc::new(Mutex::new(Recorder::default()));
-        let shared: SharedObserver = rec.clone();
-        let device = Arc::new(Mutex::new(Device::new(Box::new(model))));
-        let server = Server::new(Arc::clone(&device), "1-1", 1, 2).with_observer(shared);
-        let devid = server.devid();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop2 = Arc::clone(&stop);
-        let handle = thread::spawn(move || server.run(&listener, &stop2));
-        let (mut s, _) = import(addr, "1-1").unwrap();
+        let served = serve(Box::new(model));
+        let devid = served.devid;
+        let (mut s, _) = import(served.addr, "1-1").unwrap();
         s.write_all(&cmd_submit(1, devid, DIR_OUT, 0, 0, Some(setup(0x00, 9, 1, 0, 0)), &[]))
             .unwrap();
         assert_eq!(read_ret(&mut s, false).unwrap().status, 0);
@@ -1021,108 +743,14 @@ mod tests {
         let r = read_ret(&mut s, false).unwrap();
         assert_eq!((r.command, r.seqnum, r.status), (RET_UNLINK, 5, 0));
         drop(s);
-        stop.store(true, Ordering::Relaxed);
-        handle.join().unwrap().unwrap();
+        let rec = served.stop();
         let rec = rec.lock().unwrap();
-        let unlinked: Vec<&Transfer> =
-            rec.transfers.iter().filter(|t| t.outcome == Outcome::Unlinked).collect();
-        assert_eq!(unlinked.len(), 1);
-        assert_eq!((unlinked[0].seqnum, unlinked[0].endpoint, unlinked[0].offered), (2, 0x82, 64));
-        assert_eq!(unlinked[0].reply, Reply::Data(vec![0x5a; 64]));
-        let held: Vec<u32> =
-            rec.transfers.iter().filter(|t| t.outcome == Outcome::Held).map(|t| t.seqnum).collect();
-        assert_eq!(held, [2], "URB 3 waited behind it and was never offered");
-        assert!(
-            rec.notices.iter().any(|n| n.starts_with("seq 3:") && n.contains("queued")),
-            "{:?}",
-            rec.notices
-        );
-    }
-
-    #[test]
-    fn an_answer_longer_than_the_urb_is_a_babble() {
-        use crate::descriptor::{self, DeviceDescriptor};
-        let mut body = Vec::new();
-        body.extend_from_slice(&descriptor::interface(0, 0, 2, [0xff, 0, 0], 0));
-        body.extend_from_slice(&descriptor::endpoint(0x81, 3, 8, 1));
-        body.extend_from_slice(&descriptor::endpoint(0x82, 2, 64, 0));
-        let device = DeviceDescriptor {
-            usb: 0x0200,
-            class: [0, 0, 0],
-            max_packet0: 64,
-            vendor: 0x1234,
-            product: 0x5678,
-            device: 0x0100,
-            strings: [0, 0, 0],
-            configurations: 1,
-        };
-        let asked = Arc::new(Mutex::new(Vec::new()));
-        let model = Babbler {
-            descriptors: crate::model::Descriptors {
-                speed: crate::model::Speed::Full,
-                device: device.bytes(),
-                configs: vec![descriptor::configuration(1, 0, 0x80, 50, &body)],
-                strings: Vec::new(),
-            },
-            answer: 6,
-            asked: Arc::clone(&asked),
-        };
-        let rec = Arc::new(Mutex::new(Recorder::default()));
-        let shared: SharedObserver = rec.clone();
-        let device = Arc::new(Mutex::new(Device::new(Box::new(model))));
-        let server = Server::new(Arc::clone(&device), "1-1", 1, 2).with_observer(shared);
-        let devid = server.devid();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop2 = Arc::clone(&stop);
-        let handle = thread::spawn(move || server.run(&listener, &stop2));
-        let (mut s, _) = import(addr, "1-1").unwrap();
-        s.write_all(&cmd_submit(1, devid, DIR_OUT, 0, 0, Some(setup(0x00, 9, 1, 0, 0)), &[]))
-            .unwrap();
-        assert_eq!(read_ret(&mut s, false).unwrap().status, 0);
-        // Bulk: the model is asked for a whole packet, the URB of 4
-        // bytes babbles with the 4 that fit.
-        s.write_all(&cmd_submit(2, devid, DIR_IN, 2, 4, None, &[])).unwrap();
-        let r = read_ret(&mut s, true).unwrap();
-        assert_eq!((r.status, r.data), (EOVERFLOW, vec![0xa5; 4]));
-        // A URB that holds the answer completes.
-        s.write_all(&cmd_submit(3, devid, DIR_IN, 2, 6, None, &[])).unwrap();
-        let r = read_ret(&mut s, true).unwrap();
-        assert_eq!((r.status, r.data), (0, vec![0xa5; 6]));
-        // Interrupt: the length is not rounded, and the same holds.
-        s.write_all(&cmd_submit(4, devid, DIR_IN, 1, 2, None, &[])).unwrap();
-        let r = read_ret(&mut s, true).unwrap();
-        assert_eq!((r.status, r.data), (EOVERFLOW, vec![0xa5; 2]));
-        drop(s);
-        stop.store(true, Ordering::Relaxed);
-        handle.join().unwrap().unwrap();
-        let rec = rec.lock().unwrap();
-        let outcomes: Vec<(u32, usize, usize, Outcome)> = rec
+        let unlinked: Vec<u32> = rec
             .transfers
             .iter()
-            .filter(|t| t.endpoint != 0)
-            .map(|t| (t.seqnum, t.requested, t.offered, t.outcome))
+            .filter(|t| t.outcome == Outcome::Unlinked)
+            .map(|t| t.seqnum)
             .collect();
-        assert_eq!(
-            outcomes,
-            [
-                (2, 4, 64, Outcome::Babble),
-                (3, 6, 64, Outcome::Completed),
-                (4, 2, 2, Outcome::Babble)
-            ]
-        );
-        assert_eq!(rec.transfers[1].reply, Reply::Data(vec![0xa5; 6]), "the reply before the cut");
-        assert_eq!(
-            *asked.lock().unwrap(),
-            [
-                ("submitted", 2, 4),
-                ("transfer", 2, 64),
-                ("submitted", 2, 6),
-                ("transfer", 2, 64),
-                ("submitted", 1, 2),
-                ("transfer", 1, 2),
-            ]
-        );
+        assert_eq!(unlinked, [2]);
     }
 }

@@ -5,7 +5,6 @@
 //! device, the configuration state, endpoint halts, and the checks on
 //! every transfer the host submits.
 
-use crate::arm::{Arm, Event};
 use crate::descriptor::{self, truncate};
 use crate::model::{
     CONTROL, Descriptors, DeviceModel, Endpoint, RECIPIENT_DEVICE, RECIPIENT_ENDPOINT,
@@ -32,14 +31,13 @@ pub struct Device {
     descriptors: Descriptors,
     config: u8,
     halted: Vec<u8>,
-    armed: Option<Arm>,
 }
 
 impl Device {
     /// Wraps a model; the device starts unconfigured.
     pub fn new(model: Box<dyn DeviceModel>) -> Device {
         let descriptors = model.descriptors().clone();
-        Device { model, descriptors, config: 0, halted: Vec::new(), armed: None }
+        Device { model, descriptors, config: 0, halted: Vec::new() }
     }
 
     /// The model's name.
@@ -56,27 +54,11 @@ impl Device {
     /// descriptors are taken over at the next [`Device::reset`].
     pub fn replace_model(&mut self, model: Box<dyn DeviceModel>) {
         self.model = model;
-        self.armed = None;
     }
 
-    /// Arms an event for the run that follows; one at a time, and a
-    /// fresh model ([`Device::replace_model`]) disarms it.
-    pub fn arm(&mut self, arm: Arm) {
-        self.armed = Some(arm);
-    }
-
-    /// After every offer of a transfer to the model: counts it for the
-    /// armed event, asks the model for its point, and returns the event
-    /// when it fires (once; it is disarmed then).
-    pub fn fired(&mut self, ep: u8, is_in: bool, reply: &Reply) -> Option<Event> {
-        let point = self.model.mark();
-        let arm = self.armed.as_mut()?;
-        if arm.fires(ep & 0x0f, is_in, reply, point) {
-            let event = arm.event.clone();
-            self.armed = None;
-            return Some(event);
-        }
-        None
+    /// See [`DeviceModel::mark`].
+    pub fn mark(&mut self) -> bool {
+        self.model.mark()
     }
 
     /// Whether the model's descriptors differ from those the host
@@ -498,22 +480,5 @@ mod tests {
             "cut to wLength"
         );
         assert!(v.is_empty(), "{v:?}");
-    }
-
-    #[test]
-    fn armed_events_fire_once_at_their_point() {
-        let mut dev = Device::new(Box::new(UsbRelay::new(2)));
-        let data = Reply::Data(vec![1]);
-        dev.arm(Arm::parse("unplug in=1:2").unwrap());
-        assert_eq!(dev.fired(0x81, true, &Reply::Nak), None, "a NAK does not count");
-        assert_eq!(dev.fired(0x01, false, &Reply::ack()), None, "nor does an OUT");
-        assert_eq!(dev.fired(0x82, true, &data), None, "nor another endpoint");
-        assert_eq!(dev.fired(0x81, true, &data), None);
-        assert_eq!(dev.fired(0x81, true, &Reply::Stall), Some(Event::Unplug));
-        assert_eq!(dev.fired(0x81, true, &data), None, "once");
-        // A fresh model disarms.
-        dev.arm(Arm::parse("mark stop out=0:1").unwrap());
-        dev.replace_model(Box::new(UsbRelay::new(2)));
-        assert_eq!(dev.fired(0, false, &Reply::ack()), None);
     }
 }
