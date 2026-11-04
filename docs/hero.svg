@@ -13,7 +13,9 @@
   .plug { fill: #0969da; }
   .metal { fill: #8c959f; }
   .pill { fill: #0969da; }
-  .pillt { fill: #ffffff; font-weight: 700; font-size: 18px; }
+  .wl .fb, .wl .fa { fill: #ffffff; }
+  .wl .sb, .wl .sa, .wl .si { stroke: #ffffff; }
+.nf{fill:none}.rd{stroke-linecap:round;stroke-linejoin:round}.w5{stroke-width:5}.w8{stroke-width:8}.w9{stroke-width:9}.w10{stroke-width:10}.w12{stroke-width:12}.w4{stroke-width:4}.w6{stroke-width:6}.w7{stroke-width:7}
   .dev { fill: #fff8c5; stroke: #bf8700; stroke-width: 2.2; stroke-dasharray: 8 6; }
   .chip { fill: #fff; stroke: #bf8700; stroke-width: 2; }
   .pin { stroke: #bf8700; stroke-width: 2.4; }
@@ -27,7 +29,6 @@
     .cable { stroke: #4493f8; }
     .plug, .pill { fill: #1f6feb; }
     .metal { fill: #6e7681; }
-    .pillt { fill: #ffffff; }
     .dev { fill: #3d2e00; stroke: #d29922; }
     .chip { fill: #0d1117; stroke: #d29922; }
     .chipt { fill: #e6edf3; }
@@ -44,8 +45,13 @@
   <path class="cable" d="M312 176 C400 176 400 115 470 115 C530 115 535 115 586 115"/>
   <rect class="plug" x="586" y="102" width="34" height="26" rx="3"/>
   <rect class="metal" x="620" y="106" width="16" height="18"/>
-  <rect class="pill" x="402" y="96" width="84" height="38" rx="19"/>
-  <text class="pillt" x="444" y="121" text-anchor="middle">vusb</text>
+  <rect class="pill" x="382" y="93" width="124" height="44" rx="22"/>
+  <g class="wl" transform="translate(396 100) scale(.30)"><g transform="translate(0 6) scale(.88)"><path class="sb w5 rd nf" d="M4 36H13"/><path class="sb w5 rd nf" d="M4 50H13"/><path class="sb w5 rd nf" d="M4 64H13"/><path class="sa w5 rd nf" d="M96 36H87"/><path class="sa w5 rd nf" d="M96 50H87"/><path class="sa w5 rd nf" d="M96 64H87"/><path class="sb w5 rd nf" d="M36 4V13M36 96V87"/><path class="sa w5 rd nf" d="M64 4V13M64 96V87"/><path class="sb w5 rd nf" d="M50 19H27a8 8 0 0 0-8 8V73a8 8 0 0 0 8 8H50"/>
+<path class="sa w5 nf" stroke-dasharray="6 4.5" d="M50 19H73a8 8 0 0 1 8 8V73a8 8 0 0 1-8 8H50"/>
+<path class="sb w10 rd nf" d="M35 37L50 65"/><path class="sa w10 rd nf" d="M65 37L50 65"/></g><g transform="translate(92 14)"><path class="si w8 rd nf" d="M4 20L22 60L40 20"/>
+<path class="si w8 rd nf" d="M54 20V44a14 14 0 0 0 28 0V20V60"/>
+<path class="si w8 rd nf" d="M120 26C115 18 97 18 96 30C95 42 121 38 121 50C121 62 100 63 95 53"/>
+<path class="si w8 rd nf" d="M136 4V46"/><circle class="si w8 nf" cx="150" cy="46" r="14"/></g></g>
   <rect class="dev" x="636" y="36" width="174" height="158" rx="14"/>
   <line class="pin" x1="704" y1="72" x2="704" y2="84"/><line class="pin" x1="704" y1="146" x2="704" y2="158"/><line class="pin" x1="674" y1="94" x2="686" y2="94"/><line class="pin" x1="760" y1="94" x2="772" y2="94"/><line class="pin" x1="718" y1="72" x2="718" y2="84"/><line class="pin" x1="718" y1="146" x2="718" y2="158"/><line class="pin" x1="674" y1="108" x2="686" y2="108"/><line class="pin" x1="760" y1="108" x2="772" y2="108"/><line class="pin" x1="732" y1="72" x2="732" y2="84"/><line class="pin" x1="732" y1="146" x2="732" y2="158"/><line class="pin" x1="674" y1="122" x2="686" y2="122"/><line class="pin" x1="760" y1="122" x2="772" y2="122"/><line class="pin" x1="746" y1="72" x2="746" y2="84"/><line class="pin" x1="746" y1="146" x2="746" y2="158"/><line class="pin" x1="674" y1="136" x2="686" y2="136"/><line class="pin" x1="760" y1="136" x2="772" y2="136"/>
   <rect class="chip" x="686" y="84" width="74" height="62" rx="5"/>
