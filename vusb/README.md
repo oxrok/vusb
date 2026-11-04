@@ -1,6 +1,7 @@
 <p align="center"><img src="https://raw.githubusercontent.com/oxrok/vusb/main/docs/logo/lockup.svg" alt="vusb" width="250"></p>
 
-Write a USB device in plain Rust, then test against it without the hardware.
+vusb puts a USB device on the bus that is only Rust code. Test your driver
+without the hardware, in CI, and with fault injection.
 
 ![Your software talks over USB to a device that is only Rust code, with no hardware.](https://raw.githubusercontent.com/oxrok/vusb/main/docs/hero.svg)
 
@@ -8,9 +9,6 @@ On Linux the device is real to the whole machine: `lsusb` lists it, and libusb,
 hidraw, `/dev/ttyACM0` and `/dev/ttyUSB0` all work. In a unit test it needs no
 kernel and no root. Either way it is the same code, and it reports every time
 the host breaks the protocol.
-
-Use it to test a driver or a tool when the device is rare, expensive, not built
-yet, or hard to make fail on demand.
 
 ## Try it
 
