@@ -18,6 +18,9 @@ usbip = []
 # Sessions and their control socket: JSON lines, from vusb-ctl or any client.
 control = ["usbip", "dep:serde_json"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 serde_json = { version = "1", optional = true }
 

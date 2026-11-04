@@ -1,5 +1,11 @@
 <p align="center"><img src="https://raw.githubusercontent.com/oxrok/vusb/main/docs/logo/lockup.svg" alt="vusb" width="250"></p>
 
+<p align="center">
+<a href="https://crates.io/crates/vusb"><img src="https://img.shields.io/crates/v/vusb.svg" alt="crates.io"></a>
+<a href="https://docs.rs/vusb"><img src="https://docs.rs/vusb/badge.svg" alt="docs.rs"></a>
+<a href="https://github.com/oxrok/vusb/actions/workflows/ci.yml"><img src="https://github.com/oxrok/vusb/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
+
 vusb puts a USB device on the bus that is only Rust code. Test your driver
 without the hardware, in CI, and with fault injection.
 
@@ -92,7 +98,8 @@ fn main() -> vusb::Result<()> {
 
 Without a shell, a model implements `DeviceModel` directly. The
 [`examples`](https://github.com/oxrok/vusb/tree/main/vusb/src/examples) module
-has a short model on each kind of shell.
+has a short model on each kind of shell, and the API is documented on
+[docs.rs](https://docs.rs/vusb).
 
 ## How it works
 
