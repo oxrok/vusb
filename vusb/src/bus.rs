@@ -29,6 +29,32 @@
 //! [`Observer`]s. The convenience methods [`Bus::control`],
 //! [`Bus::read`] and [`Bus::write`] submit one URB and poll until it
 //! completes, which is what a test wants.
+//!
+//! # Examples
+//!
+//! A transport works with [`Bus::submit`], [`Bus::poll`] and
+//! [`Bus::unlink`] and sees what a host controller sees: a transfer the
+//! device NAKs is held, and an unlink cancels it.
+//!
+//! ```
+//! use vusb::bus::{Bus, Status, Step, Unlink, Urb};
+//! use vusb::device::Device;
+//! use vusb::examples::relay::UsbRelay;
+//! use vusb::model::Setup;
+//!
+//! let mut bus = Bus::new(Device::new(Box::new(UsbRelay::new(2))));
+//! let configure = Setup { request_type: 0x00, request: 9, value: 1, index: 0, length: 0 };
+//! let step = bus.submit(Urb::control(1, configure, Vec::new()));
+//! assert_eq!(step.completions[0].status, Status::Ok);
+//!
+//! // The board never sends an input report: the read is held, offered
+//! // again at every poll, and cancelled by the unlink.
+//! assert_eq!(bus.submit(Urb::read(2, 1, 64)), Step::default());
+//! assert_eq!(bus.poll(), Step::default());
+//! assert_eq!(bus.held(), 1);
+//! assert_eq!(bus.unlink(2), Unlink::Cancelled);
+//! assert_eq!(bus.held(), 0);
+//! ```
 
 use crate::arm::{Arm, Event};
 use crate::device::Device;

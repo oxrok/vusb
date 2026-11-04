@@ -12,14 +12,31 @@
 //! functional descriptors and a notification endpoint, a data interface
 //! with bulk IN and OUT), the class requests and the checks on them.
 //!
-//! ```text
+//! ```
+//! use vusb::shells::cdc::{Cdc, Faults, Identity, Port, Serial};
+//!
+//! /// Answers every line with the reading.
+//! struct Meter;
+//!
 //! impl Serial for Meter {
 //!     fn received(&mut self, data: &[u8], port: &mut Port<'_>) {
-//!         port.send(b"reply");
+//!         if data.contains(&b'\n') {
+//!             port.send(b"+1.2345E+00\r\n");
+//!         }
 //!     }
 //! }
+//!
 //! let id = Identity::new(0x1234, 0x5678, "Maker", "Meter");
-//! Box::new(Cdc::new(NAME, &id, faults, Meter))
+//! let model = Cdc::new("meter", &id, Faults::default(), Meter);
+//!
+//! // In a test: the bus is the host.
+//! use vusb::bus::Bus;
+//! use vusb::device::Device;
+//! use vusb::host::enumerate;
+//! let mut bus = Bus::new(Device::new(Box::new(model)));
+//! enumerate(&mut bus).unwrap();
+//! bus.write(2, b"READ?\n");
+//! assert_eq!(bus.read(2, 64).data, b"+1.2345E+00\r\n");
 //! ```
 //!
 //! What the kernel does (`drivers/usb/class/cdc-acm.c`, 7.2), which is

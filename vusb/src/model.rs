@@ -238,6 +238,98 @@ impl Violations {
 /// [`crate::device::Device`] before a model sees them; a model answers
 /// the class and vendor requests and the standard requests addressed
 /// to its interfaces, such as a HID report descriptor fetch.
+///
+/// # Examples
+///
+/// A vendor device with one bulk IN endpoint that counts: each read
+/// gets the next number, and a vendor request resets the count. It
+/// fits no shell, so it implements the contract itself.
+///
+/// ```
+/// use vusb::descriptor::{self, DeviceDescriptor};
+/// use vusb::model::{BULK, Descriptors, DeviceModel, Reply, Setup, Speed, VENDOR, Violations};
+///
+/// struct Counter {
+///     descriptors: Descriptors,
+///     next: u8,
+/// }
+///
+/// impl Counter {
+///     fn new() -> Counter {
+///         let mut body = Vec::new();
+///         body.extend_from_slice(&descriptor::interface(0, 0, 1, [0xff, 0, 0], 0));
+///         body.extend_from_slice(&descriptor::endpoint(0x81, BULK, 64, 0));
+///         let device = DeviceDescriptor {
+///             usb: 0x0200,
+///             class: [0, 0, 0],
+///             max_packet0: 64,
+///             vendor: 0x1209,
+///             product: 0x0002,
+///             device: 0x0100,
+///             strings: [0, 1, 0],
+///             configurations: 1,
+///         };
+///         Counter {
+///             descriptors: Descriptors {
+///                 speed: Speed::Full,
+///                 device: device.bytes(),
+///                 configs: vec![descriptor::configuration(1, 0, 0x80, 100, &body)],
+///                 strings: vec!["Counter".to_owned()],
+///             },
+///             next: 0,
+///         }
+///     }
+/// }
+///
+/// impl DeviceModel for Counter {
+///     fn name(&self) -> &'static str {
+///         "counter"
+///     }
+///
+///     fn descriptors(&self) -> &Descriptors {
+///         &self.descriptors
+///     }
+///
+///     fn control(&mut self, setup: Setup, _data: &[u8], v: &mut Violations) -> Reply {
+///         if setup.kind() == VENDOR && setup.request == 0x01 {
+///             self.next = 0;
+///             return Reply::ack();
+///         }
+///         v.report(format!("request {:#04x} is not one the counter has", setup.request));
+///         Reply::Stall
+///     }
+///
+///     fn out(&mut self, ep: u8, _data: &[u8], v: &mut Violations) -> Reply {
+///         v.report(format!("OUT to endpoint {ep}; the counter only sends"));
+///         Reply::Stall
+///     }
+///
+///     fn in_transfer(&mut self, _ep: u8, _max: usize, _v: &mut Violations) -> Reply {
+///         self.next = self.next.wrapping_add(1);
+///         Reply::Data(vec![self.next])
+///     }
+///
+///     fn reset(&mut self) {
+///         self.next = 0;
+///     }
+/// }
+///
+/// // Driven in process, as a test would.
+/// use vusb::bus::Bus;
+/// use vusb::device::Device;
+/// use vusb::host::enumerate;
+///
+/// # fn main() -> vusb::Result<()> {
+/// let mut bus = Bus::new(Device::new(Box::new(Counter::new())));
+/// assert_eq!(enumerate(&mut bus)?.product, "Counter");
+/// assert_eq!(bus.read(1, 64).data, [1]);
+/// assert_eq!(bus.read(1, 64).data, [2]);
+/// let reset = Setup { request_type: 0x40, request: 0x01, value: 0, index: 0, length: 0 };
+/// assert!(bus.control(reset, &[]).is_ok());
+/// assert_eq!(bus.read(1, 64).data, [1]);
+/// # Ok(())
+/// # }
+/// ```
 pub trait DeviceModel: Send {
     /// Short name, as a host that serves several models tells them
     /// apart; it ends up in the USB/IP device path.

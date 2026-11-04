@@ -11,6 +11,31 @@
 //! status, or streams the transfers to whoever watches; [`Recorder`]
 //! keeps them in memory, for tests.
 //!
+//! # Examples
+//!
+//! ```
+//! use std::sync::{Arc, Mutex};
+//! use vusb::bus::Bus;
+//! use vusb::device::Device;
+//! use vusb::examples::relay::UsbRelay;
+//! use vusb::model::Setup;
+//! use vusb::observer::{Outcome, Recorder, SharedObserver};
+//!
+//! let recorder = Arc::new(Mutex::new(Recorder::default()));
+//! let shared: SharedObserver = recorder.clone();
+//! let mut bus = Bus::new(Device::new(Box::new(UsbRelay::new(2)))).with_observer(shared);
+//!
+//! // Configure, then read the board's feature report through the HID interface.
+//! bus.control(Setup { request_type: 0x00, request: 9, value: 1, index: 0, length: 0 }, &[]);
+//! bus.control(Setup { request_type: 0xa1, request: 1, value: 0x0300, index: 0, length: 8 }, &[]);
+//!
+//! let seen = recorder.lock().unwrap();
+//! assert_eq!(seen.transfers.len(), 2);
+//! assert_eq!(seen.transfers[1].line(), "control a1 01 0300 0000 0008 -> 4142434445000000");
+//! assert_eq!(seen.transfers[1].outcome, Outcome::Completed);
+//! assert!(seen.violations.is_empty());
+//! ```
+//!
 //! Observers run under the host's device lock: they must not block,
 //! and whatever is slow (a socket, a file) gets the data through a
 //! channel.
