@@ -164,7 +164,7 @@ pub mod attach;
 pub mod control;
 #[cfg(feature = "control")]
 pub mod session;
-#[cfg(feature = "usbip")]
+#[cfg(any(feature = "usbip", feature = "usbredir"))]
 pub mod transport;
 
 use std::fmt;

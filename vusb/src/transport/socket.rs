@@ -1,7 +1,8 @@
 // Copyright (C) 2026 Miguel Angel Ajo Pelayo <miguelangel@ajo.es>
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The sockets a control connection comes in on.
+//! The sockets a connection comes in on: a control connection, or a
+//! usbredir guest.
 
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -15,7 +16,7 @@ use crate::{Error, Result};
 /// How long a write to a client that stopped reading may take.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Where a control socket is.
+/// Where a socket is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Address {
     /// A Unix socket's path.
@@ -48,7 +49,7 @@ impl std::fmt::Display for Address {
     }
 }
 
-/// How a control socket is opened.
+/// How a socket is opened.
 #[derive(Clone, Debug, Default)]
 pub struct ListenOptions {
     /// Who may connect to a Unix socket: its owner and group. By default
@@ -60,18 +61,30 @@ pub struct ListenOptions {
     pub allow_remote: bool,
 }
 
-pub(crate) type Reader = Box<dyn Read + Send>;
-pub(crate) type Writer = Box<dyn Write + Send>;
-pub(crate) type Accepted = (Reader, Writer);
+/// The reading half of an accepted connection.
+pub type Reader = Box<dyn Read + Send>;
+/// The writing half.
+pub type Writer = Box<dyn Write + Send>;
+/// An accepted connection, both halves.
+pub type Accepted = (Reader, Writer);
 
-pub(crate) enum Listener {
+/// A socket bound on an [`Address`], accepting connections.
+pub enum Listener {
+    /// On a TCP port.
     Tcp(TcpListener),
+    /// On a Unix socket, removed when the listener is dropped.
     #[cfg(unix)]
     Unix(std::os::unix::net::UnixListener, PathBuf),
 }
 
 impl Listener {
-    pub(crate) fn bind(address: &Address, options: &ListenOptions) -> Result<Listener> {
+    /// Binds. A TCP port 0 is resolved, see [`Listener::address`].
+    ///
+    /// # Errors
+    ///
+    /// When the address is refused (not loopback, without
+    /// `allow_remote`), the path is in use, or binding fails.
+    pub fn bind(address: &Address, options: &ListenOptions) -> Result<Listener> {
         let listener = match address {
             Address::Tcp(a) => {
                 let addrs: Vec<_> = a.to_socket_addrs()?.collect();
@@ -102,7 +115,7 @@ impl Listener {
     }
 
     /// Where it ended up: a TCP port 0 is resolved.
-    pub(crate) fn address(&self) -> io::Result<Address> {
+    pub fn address(&self) -> io::Result<Address> {
         match self {
             Listener::Tcp(l) => Ok(Address::Tcp(l.local_addr()?.to_string())),
             #[cfg(unix)]
@@ -111,7 +124,11 @@ impl Listener {
     }
 
     /// A connection, or `None` when there is none now.
-    pub(crate) fn accept(&self) -> io::Result<Option<Accepted>> {
+    ///
+    /// # Errors
+    ///
+    /// When accepting fails for another reason than nobody being there.
+    pub fn accept(&self) -> io::Result<Option<Accepted>> {
         let accepted = match self {
             Listener::Tcp(l) => l.accept().and_then(|(s, _)| tcp_pair(s)),
             #[cfg(unix)]
@@ -136,6 +153,15 @@ fn tcp_pair(s: TcpStream) -> io::Result<Accepted> {
     s.set_write_timeout(Some(WRITE_TIMEOUT))?;
     let r = s.try_clone()?;
     Ok((Box::new(r), Box::new(s)))
+}
+
+impl std::fmt::Debug for Listener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.address() {
+            Ok(a) => write!(f, "Listener({a})"),
+            Err(e) => write!(f, "Listener({e})"),
+        }
+    }
 }
 
 #[cfg(unix)]

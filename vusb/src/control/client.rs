@@ -10,7 +10,7 @@ use std::net::TcpStream;
 use serde_json::{Value, json};
 
 use super::Address;
-use super::listener::{Reader, Writer};
+use crate::transport::socket::{Reader, Writer};
 use crate::{Error, Result};
 
 /// A connection to a running session.

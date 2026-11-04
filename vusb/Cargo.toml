@@ -12,11 +12,13 @@ keywords = ["usb", "usbip", "emulation", "testing", "virtual-device"]
 categories = ["hardware-support", "development-tools::testing", "emulators"]
 
 [features]
-default = ["usbip", "control"]
+default = ["usbip", "usbredir", "control"]
 # The USB/IP server and the vhci-hcd attach path.
 usbip = []
+# The usbredir server, for QEMU's usb-redir device.
+usbredir = []
 # Sessions and their control socket: JSON lines, from vusb-ctl or any client.
-control = ["usbip", "dep:serde_json"]
+control = ["usbip", "usbredir", "dep:serde_json"]
 
 [package.metadata.docs.rs]
 all-features = true

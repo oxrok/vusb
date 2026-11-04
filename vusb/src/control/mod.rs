@@ -33,11 +33,10 @@
 //! reaches it, so anything but loopback is refused unless asked for.
 
 mod client;
-mod listener;
 
+pub(crate) use crate::transport::socket::{Accepted, Listener};
+pub use crate::transport::socket::{Address, ListenOptions};
 pub use client::Client;
-pub(crate) use listener::{Accepted, Listener};
-pub use listener::{Address, ListenOptions};
 
 use serde_json::{Value, json};
 
