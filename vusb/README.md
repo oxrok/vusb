@@ -27,11 +27,18 @@ Then, from another terminal and without root:
 ```sh
 export VUSB_CONTROL=/tmp/relay.sock
 
-lsusb -d 16c0:05df                              # it is there
-vusb-ctl subscribe tx violations --lines &      # watch what the host does
-vusb-ctl arm event=unplug when=in=0:3           # pull the cable at the 3rd control read
-lsusb -v -d 16c0:05df >/dev/null                # those reads: now it is gone
-vusb-ctl replug                                 # plug it back
+# It is there.
+lsusb -d 16c0:05df
+
+# Watch what the host does.
+vusb-ctl subscribe tx violations --lines &
+
+# Pull the cable at the third control read, which lsusb -v causes.
+vusb-ctl arm event=unplug when=in=0:3
+lsusb -v -d 16c0:05df >/dev/null
+
+# Plug it back.
+vusb-ctl replug
 vusb-ctl quit
 ```
 
