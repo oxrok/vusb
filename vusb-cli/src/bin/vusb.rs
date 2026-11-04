@@ -60,8 +60,13 @@ struct Run {
     #[arg(long, default_value = "127.0.0.1:3240")]
     listen: String,
     /// Attaches the device through vhci-hcd (Linux, root).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "usbredir")]
     attach: bool,
+    /// Serves the device over usbredir instead, for QEMU's usb-redir
+    /// device: a socket path or host:port that QEMU connects to with
+    /// `-chardev socket,id=u,path=PATH -device usb-redir,chardev=u`.
+    #[arg(long, value_name = "ADDRESS")]
+    usbredir: Option<String>,
     /// After attaching, makes the device nodes world accessible.
     #[arg(long)]
     open_devices: bool,
@@ -150,13 +155,21 @@ fn serve(args: Run) -> Result<u8> {
         .verbose(args.verbose)
         .stdio(args.stdio)
         .watch(announce);
+    if let Some(usbredir) = &args.usbredir {
+        builder = builder.usbredir(Address::parse(usbredir));
+    }
     if let Some(control) = &args.control {
         let owner = args.control_owner.as_deref().map(parse_owner).transpose()?;
         let options = ListenOptions { owner, allow_remote: args.control_allow_remote };
         builder = builder.control_with(Address::parse(control), options);
     }
     let session = builder.start()?;
-    eprintln!("listening on {} busid 1-1", session.addr());
+    if let Some(addr) = session.addr() {
+        eprintln!("listening on {addr} busid 1-1");
+    }
+    if let Some(address) = session.usbredir_address() {
+        eprintln!("usbredir on {address}");
+    }
     for address in session.control_addresses() {
         eprintln!("control on {address}");
     }

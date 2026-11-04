@@ -51,6 +51,7 @@ use crate::device::Device;
 use crate::model::{DeviceModel, Reply, Speed};
 use crate::observer::{Notice, Observer, SharedObserver, Transfer, hex};
 use crate::transport::usbip::Server;
+use crate::transport::usbredir;
 use crate::{Error, Result};
 
 /// Builds a model from `key=value` options, for the start and for each
@@ -96,6 +97,7 @@ pub struct Builder {
     log_dir: Option<PathBuf>,
     verbose: bool,
     control: Vec<(Address, ListenOptions)>,
+    usbredir: Option<(Address, ListenOptions)>,
     stdio: bool,
     watcher: Option<Watcher>,
     commands: BTreeMap<String, Command>,
@@ -117,6 +119,7 @@ impl Builder {
             log_dir: None,
             verbose: false,
             control: Vec::new(),
+            usbredir: None,
             stdio: false,
             watcher: None,
             commands: BTreeMap::new(),
@@ -198,6 +201,23 @@ impl Builder {
         self
     }
 
+    /// Serves the device over usbredir on `address` instead of USB/IP,
+    /// for QEMU's `usb-redir` device, which connects there with
+    /// `-chardev socket`. Nothing is attached to this machine then:
+    /// the device is inside the guest, and `ready` means a guest took
+    /// it. Not with [`Builder::attach`].
+    #[must_use]
+    pub fn usbredir(self, address: Address) -> Builder {
+        self.usbredir_with(address, ListenOptions::default())
+    }
+
+    /// Serves over usbredir on `address`, opened so.
+    #[must_use]
+    pub fn usbredir_with(mut self, address: Address, options: ListenOptions) -> Builder {
+        self.usbredir = Some((address, options));
+        self
+    }
+
     /// Standard input and output are a control connection, subscribed
     /// to the lifecycle events; the end of input ends the session.
     #[must_use]
@@ -228,6 +248,63 @@ impl Builder {
         self
     }
 
+    /// Starts the transport's server on its own thread: usbredir when
+    /// asked for, USB/IP otherwise.
+    fn transport(
+        &self,
+        bus: &Arc<Mutex<Bus>>,
+        hub: &Arc<Mutex<Hub>>,
+        tx: &mpsc::Sender<Input>,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<Transport> {
+        if self.attach && self.usbredir.is_some() {
+            return Err(Error::Invalid(
+                "a device is attached here or served to QEMU, not both".into(),
+            ));
+        }
+        let signal_tx = tx.clone();
+        let signal_hub = Arc::clone(hub);
+        let on_signal = move |signal| {
+            // The section the transfer that caused it ran in, which a
+            // re-attach goes back to; later is too late.
+            let section = signal_hub.lock().expect("hub lock").section.clone();
+            let _ = signal_tx.send(Input::Signal(signal, section));
+        };
+        let shared_stop = Arc::clone(stop);
+        if let Some((address, options)) = &self.usbredir {
+            let link_tx = tx.clone();
+            let server = usbredir::Server::bind(Arc::clone(bus), address, options)?
+                .on_signal(on_signal)
+                .on_link(move |link| {
+                    let _ = link_tx.send(Input::Link(link));
+                });
+            return Ok(Transport {
+                addr: None,
+                devid: 0,
+                attachment: None,
+                redir_address: Some(server.address()?),
+                redir: Some(server.handle()),
+                thread: thread::spawn(move || server.run(&shared_stop)),
+            });
+        }
+        let devnum = if self.attach { vhci::pick_devnum(self.busnum) } else { 1 };
+        let server =
+            Server::new(Arc::clone(bus), &self.busid, self.busnum, devnum).on_signal(on_signal);
+        let devid = server.devid();
+        let listener = TcpListener::bind(&self.listen)?;
+        let bound = listener.local_addr()?;
+        Ok(Transport {
+            addr: Some(bound),
+            devid,
+            attachment: self
+                .attach
+                .then(|| Attachment::new(bound, &self.busid, devid, self.open_devices)),
+            redir: None,
+            redir_address: None,
+            thread: thread::spawn(move || server.run(&listener, &shared_stop)),
+        })
+    }
+
     /// Builds the model, opens the sockets and starts serving. Nothing
     /// is attached yet: that is [`Session::run`], so a signal handler
     /// can be in place first ([`Session::stopper`]).
@@ -253,26 +330,10 @@ impl Builder {
         bus.lock().expect("bus lock").notice(Notice::Section("attach"));
 
         let (tx, rx) = mpsc::channel();
-        let devnum = if self.attach { vhci::pick_devnum(self.busnum) } else { 1 };
-        let signal_tx = tx.clone();
-        let signal_hub = Arc::clone(&hub);
-        let server = Server::new(Arc::clone(&bus), &self.busid, self.busnum, devnum).on_signal(
-            move |signal| {
-                // The section the transfer that caused it ran in, which
-                // a re-attach goes back to; later is too late.
-                let section = signal_hub.lock().expect("hub lock").section.clone();
-                let _ = signal_tx.send(Input::Signal(signal, section));
-            },
-        );
-        let devid = server.devid();
-        let listener = TcpListener::bind(&self.listen)?;
-        let addr = listener.local_addr()?;
-        let attachment =
-            self.attach.then(|| Attachment::new(addr, &self.busid, devid, self.open_devices));
-        let guard = attachment.as_ref().map(Attachment::guard);
         let stop = Arc::new(AtomicBool::new(false));
-        let shared_stop = Arc::clone(&stop);
-        let server_thread = thread::spawn(move || server.run(&listener, &shared_stop));
+        let Transport { thread: server_thread, addr, devid, attachment, redir, redir_address } =
+            self.transport(&bus, &hub, &tx, &stop)?;
+        let guard = attachment.as_ref().map(Attachment::guard);
 
         let conn_ids = Arc::new(AtomicU64::new(1));
         let mut acceptors = Vec::new();
@@ -296,6 +357,8 @@ impl Builder {
             initial_options: self.options.clone(),
             options: self.options,
             attachment,
+            redir,
+            guest: false,
             placed: None,
             unplugged: false,
             unplugged_port: None,
@@ -317,6 +380,7 @@ impl Builder {
             server_thread: Some(server_thread),
             acceptors,
             control_addresses,
+            redir_address,
         })
     }
 }
@@ -331,6 +395,17 @@ impl fmt::Debug for Builder {
             .field("control", &self.control)
             .finish_non_exhaustive()
     }
+}
+
+/// A transport's server, started.
+struct Transport {
+    thread: JoinHandle<Result<()>>,
+    /// The USB/IP server's address.
+    addr: Option<std::net::SocketAddr>,
+    devid: u32,
+    attachment: Option<Attachment>,
+    redir: Option<usbredir::Handle>,
+    redir_address: Option<Address>,
 }
 
 /// Stops a session from anywhere, a signal handler included.
@@ -369,6 +444,7 @@ enum Input {
     Line { conn: u64, line: String },
     Closed { conn: u64, ends_session: bool },
     Signal(Signal, String),
+    Link(usbredir::Link),
 }
 
 fn accept_loop(listener: &Listener, tx: &mpsc::Sender<Input>, stop: &AtomicBool, ids: &AtomicU64) {
@@ -565,6 +641,10 @@ pub struct Ctx {
     initial_options: Vec<(String, String)>,
     options: Vec<(String, String)>,
     attachment: Option<Attachment>,
+    /// The usbredir server, when that is the transport.
+    redir: Option<usbredir::Handle>,
+    /// A usbredir guest has the device.
+    guest: bool,
     placed: Option<Placed>,
     unplugged: bool,
     unplugged_port: Option<u8>,
@@ -573,7 +653,8 @@ pub struct Ctx {
     conns: BTreeMap<u64, SyncSender<String>>,
     conn: u64,
     quit: bool,
-    addr: std::net::SocketAddr,
+    /// The USB/IP server's address; none over usbredir.
+    addr: Option<std::net::SocketAddr>,
     devid: u32,
     help: Vec<Value>,
 }
@@ -628,6 +709,15 @@ impl Ctx {
     /// the kernel has configured it, the log goes on in section `resume`
     /// when given, so that its enumeration is not in a run's section.
     fn attach(&mut self, want: Option<u8>, resume: Option<&str>) -> Result<Value> {
+        if let Some(redir) = &self.redir {
+            // The server resets the bus and announces the device; the
+            // guest's enumeration follows on its own time.
+            redir.connect();
+            if let Some(name) = resume {
+                self.section(name);
+            }
+            return Ok(json!({}));
+        }
         let speed = self.bus().device().model_descriptors().speed;
         let bus = Arc::clone(&self.bus);
         let Some(attachment) = &mut self.attachment else {
@@ -670,10 +760,20 @@ impl Ctx {
 
     fn take_off(&mut self) -> Result<Option<u8>> {
         self.placed = None;
+        if let Some(redir) = &self.redir {
+            redir.disconnect();
+            return Ok(None);
+        }
         match &mut self.attachment {
             Some(a) => a.detach(),
             None => Ok(None),
         }
+    }
+
+    /// Whether the device is put somewhere: on this machine, or in a
+    /// guest.
+    fn served(&self) -> bool {
+        self.attachment.is_some() || self.redir.is_some()
     }
 
     /// A fresh model behind the device, from the current options: its
@@ -695,7 +795,7 @@ impl Ctx {
             bus.comment("model reset");
             bus.device().needs_reenumeration()
         };
-        if again && self.attachment.is_some() {
+        if again && self.served() {
             self.section("reset");
             let fields = self.reattach("reset", None)?;
             self.emit("renumerated", fields);
@@ -740,7 +840,7 @@ impl Ctx {
         self.section("replug");
         let port = self.unplugged_port.take();
         let fields = self.attach(port, None)?;
-        if self.attachment.is_none() {
+        if !self.served() {
             // Nobody re-imports it, so nothing else brings it back.
             self.bus().reset();
         }
@@ -751,7 +851,10 @@ impl Ctx {
     fn signal(&mut self, signal: Signal, section: String) -> Result<()> {
         match signal {
             Signal::Renumeration(Renumeration { .. }) => {
-                if self.attachment.is_some() {
+                if self.redir.is_some() {
+                    // The server did the disconnect and the connect.
+                    self.emit("renumerated", json!({}));
+                } else if self.attachment.is_some() {
                     let fields = self.reattach("renumeration", Some(section))?;
                     self.emit("renumerated", fields);
                 }
@@ -787,6 +890,7 @@ impl fmt::Debug for Ctx {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ctx")
             .field("addr", &self.addr)
+            .field("redir", &self.redir)
             .field("placed", &self.placed)
             .field("unplugged", &self.unplugged)
             .finish_non_exhaustive()
@@ -803,6 +907,7 @@ pub struct Session {
     server_thread: Option<JoinHandle<Result<()>>>,
     acceptors: Vec<JoinHandle<()>>,
     control_addresses: Vec<Address>,
+    redir_address: Option<Address>,
 }
 
 impl Session {
@@ -815,9 +920,16 @@ impl Session {
         }
     }
 
-    /// The USB/IP server's address.
-    pub fn addr(&self) -> std::net::SocketAddr {
+    /// The USB/IP server's address; none when the device is served
+    /// over usbredir.
+    pub fn addr(&self) -> Option<std::net::SocketAddr> {
         self.ctx.addr
+    }
+
+    /// Where QEMU connects, when the device is served over usbredir (a
+    /// TCP port 0 is resolved).
+    pub fn usbredir_address(&self) -> Option<&Address> {
+        self.redir_address.as_ref()
     }
 
     /// The `devid` of the device, which a USB/IP client's URBs carry.
@@ -895,6 +1007,11 @@ impl Session {
                     }
                 }
                 Ok(Input::Signal(signal, section)) => self.ctx.signal(signal, section)?,
+                Ok(Input::Link(link)) => {
+                    let connected = link == usbredir::Link::Connected;
+                    self.ctx.guest = connected;
+                    self.ctx.emit(if connected { "ready" } else { "gone" }, json!({}));
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
@@ -1047,10 +1164,11 @@ fn status_command(ctx: &Ctx) -> Value {
     let d = device.descriptors();
     json!({
         "model": device.name(),
-        "transport": "usbip",
-        "listen": ctx.addr.to_string(),
+        "transport": if ctx.redir.is_some() { "usbredir" } else { "usbip" },
+        "listen": ctx.addr.map(|a| a.to_string()),
         "devid": ctx.devid,
         "attached": placed,
+        "guest": ctx.redir.as_ref().map(|_| ctx.guest),
         "unplugged": ctx.unplugged,
         "speed": speed_name(d.speed),
         "vendor": d.vendor_id(),
@@ -1221,7 +1339,7 @@ mod tests {
         let session =
             builder.control(Address::parse("127.0.0.1:0")).start().expect("session starts");
         let client = Client::connect(&session.control_addresses()[0]).unwrap();
-        let (addr, devid) = (session.addr(), session.devid());
+        let (addr, devid) = (session.addr().expect("over USB/IP"), session.devid());
         Running { client, addr, devid, handle: thread::spawn(move || session.run()) }
     }
 
@@ -1533,5 +1651,75 @@ mod tests {
         assert_eq!(b.call("sync", &json!({})).unwrap(), json!({}));
         assert_eq!(stopper.finish().violations, 0);
         handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_session_over_usbredir_is_driven_the_same_way() {
+        use crate::transport::usbredir::{Guest, caps, kinds, statuses};
+        let session = Builder::new(relay_factory())
+            .usbredir(Address::parse("127.0.0.1:0"))
+            .control(Address::parse("127.0.0.1:0"))
+            .start()
+            .unwrap();
+        assert_eq!(session.addr(), None, "no USB/IP server");
+        let redir = session.usbredir_address().unwrap().clone();
+        let mut client = Client::connect(&session.control_addresses()[0]).unwrap();
+        let handle = thread::spawn(move || session.run());
+        client.call("subscribe", &json!({"topics": ["events"]})).unwrap();
+        let status = client.call("status", &json!({})).unwrap();
+        assert_eq!(
+            (status["transport"].clone(), status["guest"].clone()),
+            (json!("usbredir"), json!(false))
+        );
+
+        let mut guest = Guest::connect(&redir, caps::QEMU).unwrap();
+        guest.device().unwrap();
+        assert_eq!(guest.set_configuration(1, 1).unwrap(), (statuses::SUCCESS, 1));
+        let report = setup(0xa1, 1, 0x0300, 0, 8);
+        assert_eq!(guest.control(2, report, &[]).unwrap().1, b"ABCDE\0\0\0");
+        client.call("sync", &json!({})).unwrap();
+        assert_eq!(client.next_event().unwrap().unwrap()["event"], "ready");
+        assert_eq!(client.call("status", &json!({})).unwrap()["guest"], true);
+
+        // Unplug by command: the guest loses the device; replug brings
+        // it back on the same connection.
+        client.call("unplug", &json!({})).unwrap();
+        assert_eq!(guest.read().unwrap().kind, kinds::DEVICE_DISCONNECT);
+        guest.disconnect_ack().unwrap();
+        client.call("replug", &json!({})).unwrap();
+        guest.device().unwrap();
+        assert_eq!(guest.set_configuration(3, 1).unwrap(), (statuses::SUCCESS, 1));
+
+        // New options change the descriptors: the reset re-announces.
+        client.call("options", &json!({"relays": 4})).unwrap();
+        client.call("reset", &json!({})).unwrap();
+        assert_eq!(guest.read().unwrap().kind, kinds::DEVICE_DISCONNECT);
+        guest.disconnect_ack().unwrap();
+        guest.device().unwrap();
+        let (_, d) = guest.control(4, setup(0x80, 6, 0x0302, 0x0409, 255), &[]).unwrap();
+        let name: Vec<u16> = d[2..].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        assert_eq!(String::from_utf16_lossy(&name), "USBRelay4");
+
+        // An armed unplug fires from the guest's traffic.
+        client.call("arm", &json!({"event": "unplug", "when": "in=0:1"})).unwrap();
+        assert_eq!(guest.control(5, report, &[]).unwrap().0, statuses::SUCCESS);
+        assert_eq!(guest.read().unwrap().kind, kinds::DEVICE_DISCONNECT);
+        client.call("sync", &json!({})).unwrap();
+        assert_eq!(client.call("status", &json!({})).unwrap()["unplugged"], true);
+        let names: Vec<String> = std::iter::from_fn(|| {
+            let e = client.next_event().ok()??;
+            let name = e["event"].as_str()?.to_owned();
+            (name != "fired").then_some(name).or(None)
+        })
+        .collect();
+        assert!(names.contains(&"unplugged".to_owned()), "{names:?}");
+        assert!(names.contains(&"renumerated".to_owned()), "{names:?}");
+
+        client.call("quit", &json!({})).unwrap();
+        assert_eq!(handle.join().unwrap().unwrap().violations, 0);
+        // Not both at once.
+        let both =
+            Builder::new(relay_factory()).attach(true).usbredir(Address::parse("127.0.0.1:0"));
+        assert!(both.start().is_err());
     }
 }
