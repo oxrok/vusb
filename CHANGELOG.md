@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1 (2026-11-05)
+
+Documentation only; the code is that of 0.1.0.
+
+- A README that says what vusb is for, with a picture, a logo, and the
+  design and the control protocol on pages of their own.
+- A front page for docs.rs, and examples on `DeviceModel`, `Bus`,
+  `Observer` and the CDC-ACM shell.
+- `vusb-cli` has its own README.
+
 ## 0.1.0 (2026-11-04)
 
 - The device core (`DeviceModel`, `Device`, descriptors), the HID, CDC-ACM,
