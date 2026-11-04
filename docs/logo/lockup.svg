@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 100" width="280" role="img" aria-label="vusb"><title>vusb</title>
+<style>.nf{fill:none}.rd{stroke-linecap:round;stroke-linejoin:round}.w5{stroke-width:5}.w8{stroke-width:8}.w9{stroke-width:9}.w10{stroke-width:10}.w12{stroke-width:12}.w4{stroke-width:4}.w6{stroke-width:6}.w7{stroke-width:7}.fb{fill:#0969da}.fa{fill:#bf8700}.sb{stroke:#0969da}.sa{stroke:#bf8700}.si{stroke:#1f2328}@media (prefers-color-scheme: dark){.fb{fill:#4493f8}.fa{fill:#e3b341}.sb{stroke:#4493f8}.sa{stroke:#e3b341}.si{stroke:#e6edf3}}</style>
+<g transform="translate(0 6) scale(.88)"><path class="sb w5 rd nf" d="M4 36H13"/><path class="sb w5 rd nf" d="M4 50H13"/><path class="sb w5 rd nf" d="M4 64H13"/><path class="sa w5 rd nf" d="M96 36H87"/><path class="sa w5 rd nf" d="M96 50H87"/><path class="sa w5 rd nf" d="M96 64H87"/><path class="sb w5 rd nf" d="M36 4V13M36 96V87"/><path class="sa w5 rd nf" d="M64 4V13M64 96V87"/><path class="sb w5 rd nf" d="M50 19H27a8 8 0 0 0-8 8V73a8 8 0 0 0 8 8H50"/>
+<path class="sa w5 nf" stroke-dasharray="6 4.5" d="M50 19H73a8 8 0 0 1 8 8V73a8 8 0 0 1-8 8H50"/>
+<path class="sb w10 rd nf" d="M35 37L50 65"/><path class="sa w10 rd nf" d="M65 37L50 65"/></g><g transform="translate(92 14)"><path class="si w8 rd nf" d="M4 20L22 60L40 20"/>
+<path class="si w8 rd nf" d="M54 20V44a14 14 0 0 0 28 0V20V60"/>
+<path class="si w8 rd nf" d="M120 26C115 18 97 18 96 30C95 42 121 38 121 50C121 62 100 63 95 53"/>
+<path class="si w8 rd nf" d="M136 4V46"/><circle class="si w8 nf" cx="150" cy="46" r="14"/></g>
+</svg>

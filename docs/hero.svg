@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 270" width="860" role="img" aria-label="Your software talks over USB to a device that is only Rust code, with no hardware.">
+  <title>Your software talks over USB to a device that is only Rust code, with no hardware.</title>
+  <style>
+  text { font-family: -apple-system, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; fill: #1f2328; }
+  .t { font-weight: 600; font-size: 19px; }
+  .s { fill: #59636e; font-size: 15px; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Noto Sans Mono", monospace; font-size: 13.5px; fill: #e6edf3; }
+  .ok { fill: #7ee787; }
+  .chipt { font-weight: 700; font-size: 16px; fill: #1f2328; }
+  .lap { fill: #f6f8fa; stroke: #8c959f; stroke-width: 2; }
+  .screen { fill: #161b22; }
+  .cable { fill: none; stroke: #0969da; stroke-width: 5; stroke-linecap: round; }
+  .plug { fill: #0969da; }
+  .metal { fill: #8c959f; }
+  .pill { fill: #0969da; }
+  .pillt { fill: #ffffff; font-weight: 700; font-size: 18px; }
+  .dev { fill: #fff8c5; stroke: #bf8700; stroke-width: 2.2; stroke-dasharray: 8 6; }
+  .chip { fill: #fff; stroke: #bf8700; stroke-width: 2; }
+  .pin { stroke: #bf8700; stroke-width: 2.4; }
+  @media (prefers-color-scheme: dark) {
+    text { fill: #e6edf3; }
+    .s { fill: #9198a1; }
+    .mono { fill: #e6edf3; }
+    .ok { fill: #7ee787; }
+    .lap { fill: #21262d; stroke: #6e7681; }
+    .screen { fill: #010409; }
+    .cable { stroke: #4493f8; }
+    .plug, .pill { fill: #1f6feb; }
+    .metal { fill: #6e7681; }
+    .pillt { fill: #ffffff; }
+    .dev { fill: #3d2e00; stroke: #d29922; }
+    .chip { fill: #0d1117; stroke: #d29922; }
+    .chipt { fill: #e6edf3; }
+    .pin { stroke: #d29922; }
+  }
+  </style>
+  <rect class="lap" x="60" y="26" width="230" height="140" rx="10"/>
+  <rect class="screen" x="72" y="38" width="206" height="116" rx="4"/>
+  <text class="mono" x="84" y="66">$ lsusb</text>
+  <text class="mono ok" x="84" y="90">ID 16c0:05df</text>
+  <text class="mono" x="84" y="114">$ ./my-driver</text>
+  <text class="mono ok" x="84" y="138">connected</text>
+  <path class="lap" d="M38 166 H312 L326 182 Q326 186 320 186 H30 Q24 186 24 182 Z"/>
+  <path class="cable" d="M312 176 C400 176 400 115 470 115 C530 115 535 115 586 115"/>
+  <rect class="plug" x="586" y="102" width="34" height="26" rx="3"/>
+  <rect class="metal" x="620" y="106" width="16" height="18"/>
+  <rect class="pill" x="402" y="96" width="84" height="38" rx="19"/>
+  <text class="pillt" x="444" y="121" text-anchor="middle">vusb</text>
+  <rect class="dev" x="636" y="36" width="174" height="158" rx="14"/>
+  <line class="pin" x1="704" y1="72" x2="704" y2="84"/><line class="pin" x1="704" y1="146" x2="704" y2="158"/><line class="pin" x1="674" y1="94" x2="686" y2="94"/><line class="pin" x1="760" y1="94" x2="772" y2="94"/><line class="pin" x1="718" y1="72" x2="718" y2="84"/><line class="pin" x1="718" y1="146" x2="718" y2="158"/><line class="pin" x1="674" y1="108" x2="686" y2="108"/><line class="pin" x1="760" y1="108" x2="772" y2="108"/><line class="pin" x1="732" y1="72" x2="732" y2="84"/><line class="pin" x1="732" y1="146" x2="732" y2="158"/><line class="pin" x1="674" y1="122" x2="686" y2="122"/><line class="pin" x1="760" y1="122" x2="772" y2="122"/><line class="pin" x1="746" y1="72" x2="746" y2="84"/><line class="pin" x1="746" y1="146" x2="746" y2="158"/><line class="pin" x1="674" y1="136" x2="686" y2="136"/><line class="pin" x1="760" y1="136" x2="772" y2="136"/>
+  <rect class="chip" x="686" y="84" width="74" height="62" rx="5"/>
+  <text class="chipt" x="723" y="121" text-anchor="middle">Rust</text>
+  <text class="t" x="175" y="222" text-anchor="middle">Your software</text>
+  <text class="s" x="175" y="246" text-anchor="middle">drivers, tools, tests</text>
+  <text class="t" x="444" y="222" text-anchor="middle">Real USB</text>
+  <text class="s" x="444" y="246" text-anchor="middle">as far as the machine can tell</text>
+  <text class="t" x="723" y="222" text-anchor="middle">Your device</text>
+  <text class="s" x="723" y="246" text-anchor="middle">only code, no hardware</text>
+</svg>

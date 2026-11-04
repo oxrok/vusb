@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 510" width="900" role="img" aria-label="A transfer the model answers with NAK is held by the bus and offered again until the model has data. Only then does the host see a completion.">
+  <title>A transfer the model answers with NAK is held by the bus and offered again until the model has data. Only then does the host see a completion.</title>
+  <style>
+  text { font-family: -apple-system, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; fill: #1f2328; font-size: 13px; }
+  .t { font-weight: 600; font-size: 15px; }
+  .s { fill: #59636e; font-size: 12.5px; }
+  .l { fill: #59636e; font-size: 12.5px; }
+  .h { fill: #0969da; font-weight: 700; font-size: 15px; }
+  .box { fill: #f6f8fa; stroke: #8c959f; stroke-width: 1.2; }
+  .opt { fill: #f6f8fa; stroke: #8c959f; stroke-width: 1.2; stroke-dasharray: 5 4; }
+  .bus { fill: #ddf4ff; stroke: #0969da; stroke-width: 1.6; }
+  .you { fill: #fff8c5; stroke: #bf8700; stroke-width: 1.6; }
+  .edge { fill: none; stroke: #0969da; stroke-width: 1.4; stroke-dasharray: 7 5; }
+  .a { fill: none; stroke: #59636e; stroke-width: 1.5; }
+  .r { fill: none; stroke: #59636e; stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .life { stroke: #d1d9e0; stroke-width: 1.2; }
+  .head { fill: #59636e; }
+  .tick { fill: #ddf4ff; }
+  @media (prefers-color-scheme: dark) {
+    text { fill: #e6edf3; }
+    .s, .l { fill: #9198a1; }
+    .h { fill: #4493f8; }
+    .box, .opt { fill: #161b22; stroke: #6e7681; }
+    .bus { fill: #0c2d6b; stroke: #4493f8; }
+    .you { fill: #3d2e00; stroke: #d29922; }
+    .edge { stroke: #4493f8; }
+    .a, .r { stroke: #9198a1; }
+    .life { stroke: #30363d; }
+    .head { fill: #9198a1; }
+    .tick { fill: #0c2d6b; }
+  }
+</style>
+  <defs>
+    <marker id="h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M0 0 L10 5 L0 10 z"/></marker>
+    <marker id="hs" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M10 0 L0 5 L10 10 z"/></marker>
+  </defs>
+  <line class="life" x1="80" y1="60" x2="80" y2="490"/>
+  <rect class="box" x="20" y="18" width="120" height="42" rx="7"/>
+  <text class="t" x="80.0" y="44.0" text-anchor="middle">Host</text>
+  <line class="life" x1="300" y1="60" x2="300" y2="490"/>
+  <rect class="bus" x="240" y="18" width="120" height="42" rx="7"/>
+  <text class="t" x="300.0" y="44.0" text-anchor="middle">Bus</text>
+  <line class="life" x1="470" y1="60" x2="470" y2="490"/>
+  <rect class="box" x="410" y="18" width="120" height="42" rx="7"/>
+  <text class="t" x="470.0" y="44.0" text-anchor="middle">Device</text>
+  <line class="life" x1="640" y1="60" x2="640" y2="490"/>
+  <rect class="you" x="580" y="18" width="120" height="42" rx="7"/>
+  <text class="t" x="640.0" y="44.0" text-anchor="middle">Your model</text>
+  <line class="life" x1="820" y1="60" x2="820" y2="490"/>
+  <rect class="box" x="760" y="18" width="120" height="42" rx="7"/>
+  <text class="t" x="820.0" y="44.0" text-anchor="middle">Observers</text>
+  <path class="a" d="M80 112 L298 112" marker-end="url(#h)"/>
+  <text class="l" x="190.0" y="105" text-anchor="middle">submit: IN, endpoint 1, 64 bytes</text>
+  <path class="a" d="M300 154 L468 154" marker-end="url(#h)"/>
+  <text class="l" x="385.0" y="147" text-anchor="middle">offer</text>
+  <path class="a" d="M470 154 L638 154" marker-end="url(#h)"/>
+  <text class="l" x="555.0" y="147" text-anchor="middle">in_transfer</text>
+  <path class="r" d="M640 196 L302 196" marker-end="url(#h)"/>
+  <text class="l" x="555" y="189" text-anchor="middle">NAK: not yet</text>
+  <path class="a" d="M300 238 L818 238" marker-end="url(#h)"/>
+  <text class="l" x="560.0" y="231" text-anchor="middle">held</text>
+  <rect class="tick" x="20" y="262" width="860" height="28" rx="5"/>
+  <text class="l" x="450.0" y="281" text-anchor="middle">the host waits; the bus offers it again after each transfer, and every 20 ms over USB/IP</text>
+  <path class="a" d="M300 322 L468 322" marker-end="url(#h)"/>
+  <text class="l" x="385.0" y="315" text-anchor="middle">offer</text>
+  <path class="a" d="M470 322 L638 322" marker-end="url(#h)"/>
+  <text class="l" x="555.0" y="315" text-anchor="middle">in_transfer</text>
+  <path class="r" d="M640 364 L302 364" marker-end="url(#h)"/>
+  <text class="l" x="555" y="357" text-anchor="middle">Data: 6 bytes</text>
+  <path class="a" d="M300 406 L818 406" marker-end="url(#h)"/>
+  <text class="l" x="560.0" y="399" text-anchor="middle">completed</text>
+  <path class="r" d="M300 448 L82 448" marker-end="url(#h)"/>
+  <text class="l" x="190.0" y="441" text-anchor="middle">completion: 6 bytes</text>
+</svg>

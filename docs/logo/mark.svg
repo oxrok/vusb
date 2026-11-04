@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" role="img" aria-label="vusb: a chip that is half real and half imagined"><title>vusb: a chip that is half real and half imagined</title>
+<style>.nf{fill:none}.rd{stroke-linecap:round;stroke-linejoin:round}.w5{stroke-width:5}.w8{stroke-width:8}.w9{stroke-width:9}.w10{stroke-width:10}.w12{stroke-width:12}.w4{stroke-width:4}.w6{stroke-width:6}.w7{stroke-width:7}.fb{fill:#0969da}.fa{fill:#bf8700}.sb{stroke:#0969da}.sa{stroke:#bf8700}.si{stroke:#1f2328}@media (prefers-color-scheme: dark){.fb{fill:#4493f8}.fa{fill:#e3b341}.sb{stroke:#4493f8}.sa{stroke:#e3b341}.si{stroke:#e6edf3}}</style>
+<path class="sb w5 rd nf" d="M4 36H13"/><path class="sb w5 rd nf" d="M4 50H13"/><path class="sb w5 rd nf" d="M4 64H13"/><path class="sa w5 rd nf" d="M96 36H87"/><path class="sa w5 rd nf" d="M96 50H87"/><path class="sa w5 rd nf" d="M96 64H87"/><path class="sb w5 rd nf" d="M36 4V13M36 96V87"/><path class="sa w5 rd nf" d="M64 4V13M64 96V87"/><path class="sb w5 rd nf" d="M50 19H27a8 8 0 0 0-8 8V73a8 8 0 0 0 8 8H50"/>
+<path class="sa w5 nf" stroke-dasharray="6 4.5" d="M50 19H73a8 8 0 0 1 8 8V73a8 8 0 0 1-8 8H50"/>
+<path class="sb w10 rd nf" d="M35 37L50 65"/><path class="sa w10 rd nf" d="M65 37L50 65"/>
+</svg>
