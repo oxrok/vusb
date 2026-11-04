@@ -39,16 +39,34 @@ jobs:
           command: check licenses
 
   attach:
-    # The real thing: a device on the machine through vhci-hcd.
+    # The real thing: a device on the machine through vhci-hcd. A hosted
+    # kernel may have no package with the module: then this warns and checks
+    # nothing, and tools/attach-check.sh is to be run by hand before a
+    # release. Anything else that goes wrong fails the job.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y linux-modules-extra-$(uname -r) usbutils
-      - run: sudo modprobe vhci-hcd
-      - run: cargo build --workspace
-      - run: sudo -E sh tools/attach-check.sh
+      - id: vhci
+        name: Load vhci-hcd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y usbutils
+          package="linux-modules-extra-$(uname -r)"
+          if apt-cache show "$package" >/dev/null 2>&1; then
+            sudo apt-get install -y "$package"
+          fi
+          if sudo modprobe vhci-hcd; then
+            echo "available=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "::warning::no vhci-hcd for kernel $(uname -r): the attach check did not run"
+            echo "available=false" >>"$GITHUB_OUTPUT"
+          fi
+      - if: steps.vhci.outputs.available == 'true'
+        run: cargo build --workspace
+      - if: steps.vhci.outputs.available == 'true'
+        run: sudo -E sh tools/attach-check.sh
 
   msrv:
     runs-on: ubuntu-latest
