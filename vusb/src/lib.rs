@@ -56,7 +56,7 @@ use std::fmt;
 
 /// The README's example, compiled and run with the doctests.
 #[cfg(doctest)]
-#[doc = include_str!("../../README.md")]
+#[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
 /// What can go wrong.

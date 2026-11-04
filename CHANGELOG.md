@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 (2026-11-04)
 
 - The device core (`DeviceModel`, `Device`, descriptors), the HID, CDC-ACM,
   FTDI and EZ-USB shells, the USB/IP server and the `vhci-hcd` attach path,

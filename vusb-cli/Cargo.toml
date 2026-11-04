@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-readme = "../README.md"
+readme = "../vusb/README.md"
 keywords = ["usb", "usbip", "emulation", "testing"]
 categories = ["command-line-utilities", "development-tools::testing"]
 
