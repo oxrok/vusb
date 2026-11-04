@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["vusb"]
+members = ["vusb", "vusb-cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,7 @@ authors = ["Miguel Angel Ajo Pelayo <miguelangel@ajo.es>"]
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 missing_docs = "warn"
+missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

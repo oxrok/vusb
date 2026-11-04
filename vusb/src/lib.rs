@@ -22,6 +22,11 @@
 //! it, and notices such as a renumeration the model asks for or an
 //! armed [`arm::Event`] firing.
 //!
+//! A [`session::Session`] puts it together for a program: it serves a
+//! model, attaches it, and takes commands from a [`control`] socket, so
+//! that `vusb-ctl` or any client can reset it, unplug it, arm faults,
+//! and watch what the host does while it runs.
+//!
 //! Only Linux can attach the device; the models, shells and the
 //! protocol code build and test everywhere.
 
@@ -40,10 +45,19 @@ pub mod shells;
 
 #[cfg(feature = "usbip")]
 pub mod attach;
+#[cfg(feature = "control")]
+pub mod control;
+#[cfg(feature = "control")]
+pub mod session;
 #[cfg(feature = "usbip")]
 pub mod transport;
 
 use std::fmt;
+
+/// The README's example, compiled and run with the doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../../README.md")]
+struct ReadmeDoctests;
 
 /// What can go wrong.
 #[derive(Debug)]

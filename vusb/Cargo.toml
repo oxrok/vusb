@@ -12,11 +12,14 @@ keywords = ["usb", "usbip", "emulation", "testing", "virtual-device"]
 categories = ["hardware-support", "development-tools::testing", "emulators"]
 
 [features]
-default = ["usbip"]
+default = ["usbip", "control"]
 # The USB/IP server and the vhci-hcd attach path.
 usbip = []
+# Sessions and their control socket: JSON lines, from vusb-ctl or any client.
+control = ["usbip", "dep:serde_json"]
 
 [dependencies]
+serde_json = { version = "1", optional = true }
 
 [lints]
 workspace = true

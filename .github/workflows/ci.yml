@@ -30,6 +30,26 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+
+  attach:
+    # The real thing: a device on the machine through vhci-hcd.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get install -y linux-modules-extra-$(uname -r) usbutils
+      - run: sudo modprobe vhci-hcd
+      - run: cargo build --workspace
+      - run: sudo -E sh tools/attach-check.sh
+
   msrv:
     runs-on: ubuntu-latest
     steps:

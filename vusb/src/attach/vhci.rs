@@ -121,6 +121,60 @@ pub fn detach(port: u8) -> Result<()> {
 /// The status code of a free port.
 pub const PORT_FREE: u16 = 4;
 
+/// A device number, 1 to 0xffff, that no attached port of bus `busnum`
+/// has; derived from the process id, so that two servers started one
+/// after the other differ even when the first one's port is already
+/// gone. With the bus number it forms the `devid` in the controller's
+/// `status`, by which a server recognises its own port.
+pub fn pick_devnum(busnum: u32) -> u32 {
+    let used: Vec<u32> = attached_ports(None)
+        .map(|ps| ps.iter().filter(|p| p.devid >> 16 == busnum).map(|p| p.devid & 0xffff).collect())
+        .unwrap_or_default();
+    let start = std::process::id() % 0xffff;
+    (0..0xffff).map(|i| (start + i) % 0xffff + 1).find(|d| !used.contains(d)).unwrap_or(1)
+}
+
+/// Detaches the ports a crashed run left attached, those of bus
+/// `busnum` or, with `None`, every attached port, and waits for the
+/// controller to free them. Returns them. A running server's port looks
+/// just like a stale one; a harness with several servers keeps a lock
+/// of its own around this.
+///
+/// # Errors
+///
+/// When a port cannot be detached or stays in use.
+pub fn cleanup(busnum: Option<u32>) -> Result<Vec<PortStatus>> {
+    if !available() {
+        return Ok(Vec::new());
+    }
+    let stale: Vec<PortStatus> = attached_ports(None)?
+        .into_iter()
+        .filter(|p| busnum.is_none_or(|b| p.devid >> 16 == b))
+        .collect();
+    for p in &stale {
+        detach(p.port)?;
+    }
+    // The port is free once the controller has shut the connection
+    // down, which a server that is stopped rather than dead delays.
+    let start = Instant::now();
+    loop {
+        let busy: Vec<u8> = attached_ports(None)?
+            .iter()
+            .filter(|p| stale.iter().any(|s| s.port == p.port))
+            .map(|p| p.port)
+            .collect();
+        if busy.is_empty() {
+            return Ok(stale);
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            return Err(Error::Attach(format!(
+                "ports {busy:?} still in use after detach; is a server process stopped?"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// The ports in use whose device announced `devid`; with `None`, every
 /// port in use.
 pub fn attached_ports(devid: Option<u32>) -> Result<Vec<PortStatus>> {

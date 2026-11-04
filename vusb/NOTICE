@@ -1,0 +1,18 @@
+vusb
+
+Copyright (C) 2026 Miguel Angel Ajo Pelayo <miguelangel@ajo.es>
+
+Licensed under the MIT License or the Apache License, Version 2.0, at your
+option. See LICENSE-MIT and LICENSE-APACHE.
+
+The code started as the device emulation framework of oxrok
+(https://github.com/mangelajo/oxrok, commit da34603), by the same author,
+copied without its history.
+
+The FTDI shell's baud rate divisor is implemented from FTDI's application
+note AN_120, "Aliasing VCP Baud Rates", not from libftdi or the Linux
+ftdi_sio driver.
+
+The USB/IP transport is implemented from the protocol as the Linux kernel
+documents it (Documentation/usb/usbip_protocol.rst); no code of the usbip
+tools is used.

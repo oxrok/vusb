@@ -192,6 +192,17 @@ pub struct Bus {
     next: u32,
 }
 
+impl std::fmt::Debug for Bus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bus")
+            .field("device", &self.device)
+            .field("held", &self.held)
+            .field("armed", &self.armed)
+            .field("gone", &self.gone)
+            .finish_non_exhaustive()
+    }
+}
+
 /// How many polls [`Bus::control`] and its kind give a transfer before
 /// unlinking it, as a host's timeout would.
 const PATIENCE: u32 = 10_000;
@@ -265,7 +276,22 @@ impl Bus {
 
     /// Tells the observers something about the run.
     pub fn comment(&self, message: &str) {
-        self.observe(|o| o.notice(Notice::Comment(message)));
+        self.notice(Notice::Comment(message));
+    }
+
+    /// Passes a notice to the observers.
+    pub fn notice(&self, notice: Notice<'_>) {
+        self.observe(|o| o.notice(notice));
+    }
+
+    /// The device leaves the bus as a pulled cable does: the held
+    /// transfers are dropped, and nothing is answered until the next
+    /// [`Bus::reset`]. What an armed unplug does, on request.
+    pub fn unplug(&mut self) {
+        self.gone = true;
+        for u in std::mem::take(&mut self.held) {
+            self.comment(&format!("seq {}: dropped, the device is unplugged", u.seqnum));
+        }
     }
 
     /// Reports a violation the host committed outside any transfer.
@@ -415,10 +441,7 @@ impl Bus {
         let Some(event) = event else { return };
         self.observe(|o| o.notice(Notice::Fired(&event)));
         if event == Event::Unplug {
-            self.gone = true;
-            for u in std::mem::take(&mut self.held) {
-                self.comment(&format!("seq {}: dropped, the device is unplugged", u.seqnum));
-            }
+            self.unplug();
         }
         step.signals.push(Signal::Fired(event));
     }

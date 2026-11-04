@@ -15,11 +15,11 @@
 //! and whatever is slow (a socket, a file) gets the data through a
 //! channel.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex};
 
 use crate::arm::Event;
-use crate::model::{Reply, Setup};
+use crate::model::{BULK, CONTROL, INTERRUPT, ISOCHRONOUS, Reply, Setup};
 
 /// One transfer the host submitted, as it was offered to the device,
 /// with its outcome.
@@ -53,6 +53,65 @@ pub struct Transfer {
     pub outcome: Outcome,
 }
 
+/// Bytes as lowercase hex.
+pub fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+impl Transfer {
+    /// The transfer type's name.
+    pub fn kind_name(&self) -> &'static str {
+        match self.kind {
+            Some(CONTROL) => "control",
+            Some(ISOCHRONOUS) => "isochronous",
+            Some(BULK) => "bulk",
+            Some(INTERRUPT) => "interrupt",
+            _ => "unknown",
+        }
+    }
+
+    /// One line of text: `control 80 06 0100 0000 0012 -> 1201...`, or
+    /// `bulk 0x82 64 -> a5a5`, with what was written before the arrow
+    /// of an OUT, and `stall`, `held`, `babble` or `unlinked` where the
+    /// transfer did not simply complete.
+    pub fn line(&self) -> String {
+        let mut s = match self.setup {
+            Some(u) => format!(
+                "control {:02x} {:02x} {:04x} {:04x} {:04x}",
+                u.request_type, u.request, u.value, u.index, u.length
+            ),
+            None => format!("{} {:#04x} {}", self.kind_name(), self.endpoint, self.offered),
+        };
+        if !self.data.is_empty() {
+            let _ = write!(s, " {}", hex(&self.data));
+        }
+        s.push_str(" ->");
+        match (&self.reply, self.outcome) {
+            (Reply::Nak, _) => s.push_str(" held"),
+            (Reply::Stall, _) => s.push_str(" stall"),
+            (Reply::Data(d), outcome) => {
+                if self.is_in {
+                    let _ = write!(s, " {}", hex(d));
+                } else {
+                    s.push_str(" ok");
+                }
+                match outcome {
+                    Outcome::Babble => {
+                        let _ = write!(s, " babble, the URB holds {}", self.requested);
+                    }
+                    Outcome::Unlinked => s.push_str(" unlinked"),
+                    _ => {}
+                }
+            }
+        }
+        s
+    }
+}
+
 /// How a transfer ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -72,7 +131,7 @@ pub enum Outcome {
 }
 
 /// Something that happened on the run other than a transfer.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Notice<'a> {
     /// A comment on what the host did: connections, held and queued
@@ -88,6 +147,9 @@ pub enum Notice<'a> {
     },
     /// An armed event fired.
     Fired(&'a Event),
+    /// Whoever drives the run started a section: what follows belongs
+    /// to it, until the next.
+    Section(&'a str),
 }
 
 impl fmt::Display for Notice<'_> {
@@ -98,6 +160,7 @@ impl fmt::Display for Notice<'_> {
                 write!(f, "renumeration {vendor:04x}:{product:04x}")
             }
             Notice::Fired(e) => write!(f, "event {}", e.word()),
+            Notice::Section(name) => write!(f, "section {name}"),
         }
     }
 }

@@ -773,9 +773,10 @@ impl Ftdi {
 
     /// A control transfer: the vendor requests. Anything else is
     /// reported and stalled.
-    // One dispatch over the request set, kept in one place so that each
-    // request's checks read next to its effect.
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one dispatch over the request set, each request's checks next to its effect"
+    )]
     pub fn control(
         &mut self,
         ports: &mut dyn FtdiPorts,

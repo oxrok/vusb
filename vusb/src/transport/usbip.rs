@@ -17,10 +17,9 @@
 //!
 //! When the model asks to renumerate
 //! ([`crate::model::DeviceModel::take_renumeration`]), the server tells
-//! whoever drives the run through the channel given to
-//! [`Server::on_renumeration`]; that side detaches the device and
-//! imports it again, and the new import resets the bus, which takes
-//! over the model's new descriptors.
+//! whoever drives the run through [`Server::on_signal`]; that side
+//! detaches the device and imports it again, and the new import resets
+//! the bus, which takes over the model's new descriptors.
 //!
 //! Every transfer, violation and notice goes to the bus's observers.
 
@@ -32,8 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
-use crate::arm::Event;
-use crate::bus::{Bus, Completion, Renumeration, Signal, Status, Step, Unlink, Urb};
+use crate::bus::{Bus, Completion, Signal, Status, Step, Unlink, Urb};
 use crate::model::{Descriptors, Setup, Speed};
 use crate::{Error, Result};
 
@@ -68,7 +66,6 @@ const EPIPE: i32 = -32;
 /// A device sent more than the URB holds: babble, as the Linux HCDs
 /// report it.
 const EOVERFLOW: i32 = -75;
-const EINVAL: i32 = -22;
 const ECONNRESET: i32 = -104;
 
 const HEADER: usize = 48;
@@ -259,8 +256,16 @@ pub struct Server {
     busid: String,
     busnum: u32,
     devnum: u32,
-    renumeration: Option<mpsc::Sender<Renumeration>>,
-    events: Option<mpsc::Sender<Event>>,
+    signals: Option<Box<dyn Fn(Signal) + Send>>,
+}
+
+impl std::fmt::Debug for Server {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Server")
+            .field("busid", &self.busid)
+            .field("devid", &self.devid())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Server {
@@ -268,26 +273,17 @@ impl Server {
     /// `busnum` and `devnum` are what the client is told, and form the
     /// `devid` of every URB (`busnum << 16 | devnum`).
     pub fn new(bus: Arc<Mutex<Bus>>, busid: &str, busnum: u32, devnum: u32) -> Server {
-        Server { bus, busid: busid.to_owned(), busnum, devnum, renumeration: None, events: None }
+        Server { bus, busid: busid.to_owned(), busnum, devnum, signals: None }
     }
 
-    /// Where a renumeration request of the model is sent: one message
-    /// per request, after the transfer that caused it was answered and
-    /// the observers got their notice. Without one, the device stays as
-    /// it is.
+    /// What is called with each [`Signal`] of the bus, after the
+    /// transfer that caused it was answered and the observers got their
+    /// notice: a renumeration the model asks for, an armed event that
+    /// fired. It runs on the server's thread and must not block. Without
+    /// it, a device that asks to renumerate stays as it is.
     #[must_use]
-    pub fn on_renumeration(mut self, tx: mpsc::Sender<Renumeration>) -> Server {
-        self.renumeration = Some(tx);
-        self
-    }
-
-    /// Where an armed event that fired is sent ([`Bus::arm`]), after the
-    /// observers got their notice. Once an unplug fired, the bus answers
-    /// nothing more: the transfers the host submits until the device is
-    /// detached are dropped, as a device that is gone answers nothing.
-    #[must_use]
-    pub fn on_event(mut self, tx: mpsc::Sender<Event>) -> Server {
-        self.events = Some(tx);
+    pub fn on_signal(mut self, f: impl Fn(Signal) + Send + 'static) -> Server {
+        self.signals = Some(Box::new(f));
         self
     }
 
@@ -431,27 +427,14 @@ impl Server {
             write_completion(out, c)?;
         }
         for signal in step.signals {
-            match signal {
-                Signal::Renumeration(r) => match &self.renumeration {
-                    Some(tx) => {
-                        let _ = tx.send(r);
-                    }
-                    None => self.comment("nobody to renumerate the device; it stays as it is"),
-                },
-                Signal::Fired(event) => match &self.events {
-                    Some(tx) => {
-                        let _ = tx.send(event);
-                    }
-                    None => self.comment("an armed event fired; nobody to pass it to"),
-                },
+            match &self.signals {
+                Some(f) => f(signal),
+                None => self.comment(&format!("nobody to pass {signal:?} to")),
             }
         }
         Ok(())
     }
 }
-
-/// Invalid-argument status, for callers that build their own replies.
-pub const STATUS_EINVAL: i32 = EINVAL;
 
 /// A client's import of `busid` from the server at `addr`: the socket
 /// is ready to be handed to `vhci-hcd`, and the device record comes
@@ -598,7 +581,7 @@ mod tests {
         let (mut s, record) = import(served.addr, "1-1").unwrap();
         assert_eq!(record.len(), DEVICE_RECORD);
         assert_eq!(&record[300..304], &[0x16, 0xc0, 0x05, 0xdf]);
-        assert!(record.starts_with(b"/vusb/usbrelay\0"));
+        assert!(record.starts_with(b"/vusb/hid-relay\0"));
 
         // Device descriptor.
         s.write_all(&cmd_submit(1, devid, DIR_IN, 0, 18, Some(setup(0x80, 6, 0x0100, 0, 18)), &[]))

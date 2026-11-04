@@ -49,7 +49,7 @@ use crate::shells::hid::{self, HidInterface, HidReports};
 use crate::{Error, Result};
 
 /// The model name.
-pub const NAME: &str = "usbrelay";
+pub const NAME: &str = "hid-relay";
 /// One line about the device and its options, for a host that lists its models.
 pub const ABOUT: &str = "dcttech USBRelay board (HID, 16c0:05df); relays=N (1 to 8, default 2), \
      serial=TEXT|0xHEX (5 bytes), faults: stall-get=N, short-get=N, stall-set=N";
@@ -261,6 +261,7 @@ impl HidReports for Board {
 }
 
 /// The emulated board.
+#[derive(Clone, Debug)]
 pub struct UsbRelay {
     descriptors: Descriptors,
     hid: HidInterface,

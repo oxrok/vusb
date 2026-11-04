@@ -15,6 +15,10 @@ pub const INTERFACE: u8 = 4;
 pub const ENDPOINT: u8 = 5;
 /// Device qualifier, asked of full speed devices by high speed hosts.
 pub const DEVICE_QUALIFIER: u8 = 6;
+/// OTG, which `lsusb -v` and OTG hosts ask for.
+pub const OTG: u8 = 0x09;
+/// Debug, which `lsusb -v` asks for.
+pub const DEBUG: u8 = 0x0a;
 /// Binary object store, asked when `bcdUSB` is 2.01 or newer.
 pub const BOS: u8 = 0x0f;
 /// HID class descriptor.

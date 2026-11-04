@@ -1,0 +1,31 @@
+[package]
+name = "vusb-cli"
+description = "Command line tools of vusb: run an example virtual USB device, and vusb-ctl, which drives any running vusb session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../README.md"
+keywords = ["usb", "usbip", "emulation", "testing"]
+categories = ["command-line-utilities", "development-tools::testing"]
+
+[[bin]]
+name = "vusb"
+path = "src/bin/vusb.rs"
+# The library's documentation has this name.
+doc = false
+
+[[bin]]
+name = "vusb-ctl"
+path = "src/bin/vusb-ctl.rs"
+
+[dependencies]
+vusb = { path = "../vusb", version = "0.1.0" }
+clap = { version = "4", features = ["derive", "env"] }
+ctrlc = { version = "3", features = ["termination"] }
+serde_json = "1"
+
+[lints]
+workspace = true

@@ -33,6 +33,16 @@ pub struct Device {
     halted: Vec<u8>,
 }
 
+impl std::fmt::Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Device")
+            .field("model", &self.model.name())
+            .field("config", &self.config)
+            .field("halted", &self.halted)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Device {
     /// Wraps a model; the device starts unconfigured.
     pub fn new(model: Box<dyn DeviceModel>) -> Device {
@@ -257,11 +267,16 @@ impl Device {
             }
             // A high speed device has a qualifier (what it would be at
             // full speed); a full or low speed one has not, and a host
-            // may still ask. No device here has a BOS.
+            // may still ask. No device here has a BOS, and neither an
+            // OTG nor a debug descriptor; a device without one STALLs,
+            // and a host that asks has done nothing wrong.
             descriptor::DEVICE_QUALIFIER if self.descriptors.speed == Speed::High => {
                 Some(descriptor::device_qualifier(&self.descriptors.device))
             }
-            descriptor::DEVICE_QUALIFIER | descriptor::BOS => None,
+            descriptor::DEVICE_QUALIFIER
+            | descriptor::BOS
+            | descriptor::OTG
+            | descriptor::DEBUG => None,
             other => {
                 v.report(format!("GET_DESCRIPTOR of type {other:#04x} to the device"));
                 None
@@ -359,6 +374,12 @@ mod tests {
             Reply::Stall,
             "a full speed device has no qualifier"
         );
+        for optional in [0x0900, 0x0a00, 0x0f00] {
+            assert_eq!(
+                dev.control(setup(0x80, GET_DESCRIPTOR, optional, 0, 10), &[], &mut v),
+                Reply::Stall
+            );
+        }
         assert!(v.is_empty(), "{v:?}");
         // Before configuration the interrupt endpoint is not there.
         assert_eq!(dev.transfer_in(1, 64, &mut v), Reply::Stall);

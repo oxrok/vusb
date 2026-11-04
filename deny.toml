@@ -1,0 +1,21 @@
+# cargo deny check licenses: what vusb links stays compatible with its own
+# MIT OR Apache-2.0. No copyleft: consumers of either licence must be able
+# to take the crate as it is.
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8

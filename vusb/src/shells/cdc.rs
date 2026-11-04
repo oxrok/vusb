@@ -224,6 +224,7 @@ pub trait Serial: Send {
 }
 
 /// What a [`Serial`] model sees of the line and sends through.
+#[derive(Debug)]
 pub struct Port<'a> {
     state: &'a mut State,
     violations: &'a mut Violations,
@@ -432,7 +433,7 @@ impl Faults {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools, reason = "independent lines and latches of the port")]
 #[derive(Debug, Default)]
 struct State {
     line: Line,
@@ -472,6 +473,7 @@ impl State {
 }
 
 /// A CDC-ACM function around a [`Serial`] model.
+#[derive(Debug)]
 pub struct Cdc<S> {
     name: &'static str,
     descriptors: Descriptors,
@@ -673,6 +675,7 @@ pub mod host {
     use super::*;
 
     /// A function with the tty open.
+    #[derive(Debug)]
     pub struct Host<S> {
         /// The function.
         pub cdc: Cdc<S>,
