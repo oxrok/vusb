@@ -11,7 +11,7 @@ echo "VUSB-GUEST: up"
 # which this guest does not carry: load it without that rule.
 modprobe --ignore-install snd_pcm 2>/dev/null
 # Built into some kernels, modules of others.
-for m in xhci_pci usbhid hid_generic cdc_acm ftdi_sio snd_usb_audio; do
+for m in xhci_pci usbhid hid_generic cdc_acm ftdi_sio snd_usb_audio uvcvideo; do
     modprobe "$m" 2>/dev/null
 done
 
@@ -59,6 +59,13 @@ while :; do
             if [ -e /proc/asound/card0 ]; then
                 arecord -q -D hw:0,0 -f S16_LE -r 48000 -c 1 -d 1 -t raw /tmp/rec.raw 2>/tmp/arecord.err
                 echo "VUSB-GUEST: audio $(wc -c </tmp/rec.raw) $(od -An -tx1 -N 16 /tmp/rec.raw | tr -d ' \n')"
+            fi
+            # A camera: ten frames, and the number each one shows, or
+            # what is wrong with them.
+            if [ -e /dev/video0 ]; then
+                v4l2-ctl -d /dev/video0 --stream-mmap --stream-count=10 \
+                    --stream-to=/tmp/capture.raw >/dev/null 2>/tmp/v4l2.err
+                echo "VUSB-GUEST: video $(sh /vusb-frames /tmp/capture.raw 2>&1 | tr '\n' ' ')"
             fi
             echo "VUSB-GUEST: checked"
         fi

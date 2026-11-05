@@ -9,11 +9,14 @@
 //! - [`ftdi_loopback`]: an FTDI chip with its pins looped back.
 //! - [`uac_mic`]: a USB Audio microphone that hears a tone, on an
 //!   isochronous endpoint.
+//! - [`uvc_cam`]: a USB Video camera that sees a test pattern, a stream
+//!   the host negotiates first.
 
 pub mod cdc_echo;
 pub mod ftdi_loopback;
 pub mod relay;
 pub mod uac_mic;
+pub mod uvc_cam;
 
 use crate::model::DeviceModel;
 use crate::{Error, Result};
@@ -24,6 +27,7 @@ pub const NAMES: &[(&str, &str)] = &[
     (ftdi_loopback::NAME, ftdi_loopback::ABOUT),
     (relay::NAME, relay::ABOUT),
     (uac_mic::NAME, uac_mic::ABOUT),
+    (uvc_cam::NAME, uvc_cam::ABOUT),
 ];
 
 /// Builds an example from its name and `key=value` options.
@@ -37,6 +41,7 @@ pub fn build(name: &str, options: &[(String, String)]) -> Result<Box<dyn DeviceM
         ftdi_loopback::NAME => ftdi_loopback::build(options),
         relay::NAME => relay::build(options),
         uac_mic::NAME => uac_mic::build(options),
+        uvc_cam::NAME => uvc_cam::build(options),
         other => Err(Error::Invalid(format!("no example named {other}"))),
     }
 }

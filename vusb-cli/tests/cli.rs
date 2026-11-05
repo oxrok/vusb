@@ -83,7 +83,7 @@ fn vusb_ctl_drives_a_running_device() {
 fn the_examples_are_listed_and_a_bad_one_is_refused() {
     let list = Command::new(env!("CARGO_BIN_EXE_vusb")).arg("list").output().expect("vusb runs");
     let text = String::from_utf8_lossy(&list.stdout);
-    for name in ["hid-relay", "cdc-echo", "ftdi-loopback"] {
+    for name in ["hid-relay", "cdc-echo", "ftdi-loopback", "uac-mic", "uvc-cam"] {
         assert!(text.contains(name), "{text}");
     }
     let bad = Command::new(env!("CARGO_BIN_EXE_vusb"))

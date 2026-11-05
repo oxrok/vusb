@@ -72,3 +72,9 @@ let session = Builder::new(factory)
 kernel, boots it in QEMU with the device, and checks that the guest's kernel
 binds it, that data goes through, and that an unplug and a replug are seen. It
 needs `dracut` and no root.
+
+With `uac-mic` the guest records a second of the tone, and with `uvc-cam` it
+captures ten frames and checks each against the pattern. Those need
+`snd-usb-audio` and `uvcvideo` in the guest's kernel. When this machine's
+kernel lacks them, name another installed one:
+`VUSB_GUEST_KERNEL=6.8.0-45-generic tools/qemu-check.sh uvc-cam`.

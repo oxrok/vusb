@@ -96,7 +96,8 @@
 //! of one service interval, or nothing, and
 //! [`iso_out`](model::DeviceModel::iso_out) takes one. A streaming
 //! model counts those calls for its time: [`examples::uac_mic`] sends
-//! 48 samples a call and never reads a clock.
+//! 48 samples a call, [`examples::uvc_cam`] three lines of a picture,
+//! and neither reads a clock.
 //!
 //! A model answers each transfer with [`Reply::Data`](model::Reply),
 //! [`Reply::Nak`](model::Reply) or [`Reply::Stall`](model::Reply), and

@@ -17,6 +17,13 @@
 - `uac-mic`, an example USB Audio microphone that hears a tone: the
   kernel's `snd-usb-audio` records it sample for sample, on the machine
   (`tools/audio-check.sh`) and in a QEMU guest.
+- `uvc-cam`, an example USB Video camera that sees a test pattern: the
+  host negotiates the format, and the kernel's `uvcvideo` captures the
+  frames byte for byte, on the machine (`tools/video-check.sh`) and in a
+  QEMU guest. Each frame shows its number, and `tools/frames.sh` reads a
+  capture back.
+- `tools/qemu-check.sh` takes the guest's kernel from `VUSB_GUEST_KERNEL`,
+  for a machine whose own kernel lacks the drivers.
 - `Session::addr` returns an `Option`: there is no USB/IP server over
   usbredir. The socket types moved to `transport::socket`; `control`
   still exports `Address` and `ListenOptions`.
