@@ -13,6 +13,11 @@ The FTDI shell's baud rate divisor is implemented from FTDI's application
 note AN_120, "Aliasing VCP Baud Rates", not from libftdi or the Linux
 ftdi_sio driver.
 
+The usbredir transport is implemented from the protocol's description
+(usb-redirection-protocol.md, version 0.7, in the usbredir repository) and
+the numeric codes of its header file; no code of usbredir or QEMU is used,
+and neither is linked.
+
 The USB/IP transport is implemented from the protocol as the Linux kernel
 documents it (Documentation/usb/usbip_protocol.rst); no code of the usbip
 tools is used.

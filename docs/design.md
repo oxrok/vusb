@@ -14,6 +14,10 @@ layers. You write the yellow box. vusb is everything inside the dashed line.
 - **Your model** says what the device means. It implements `DeviceModel`, or a
   shell's smaller trait.
 - **Observers** see every transfer, to keep a log, count violations or stream live.
+- **Transports** carry the bus to a host: USB/IP to Linux's `vhci-hcd`, so the
+  device is on the machine, or usbredir to
+  [QEMU](https://github.com/oxrok/vusb/blob/main/docs/qemu.md), so it is inside
+  a guest. Both are codecs around the same `Bus`.
 - **Session** serves a model and attaches it, and takes commands through the
   [control protocol](https://github.com/oxrok/vusb/blob/main/docs/control.md).
 

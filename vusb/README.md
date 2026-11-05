@@ -120,8 +120,10 @@ See the [control protocol](https://github.com/oxrok/vusb/blob/main/docs/control.
 
 ## Limits
 
-- Attaching a device needs Linux, root and `vhci-hcd`. Models and tests run on
-  Linux, macOS and Windows.
+- Attaching a device to the machine needs Linux, root and `vhci-hcd`. A QEMU
+  guest takes one on any platform, with no root: see
+  [QEMU](https://github.com/oxrok/vusb/blob/main/docs/qemu.md). Models and
+  tests run on Linux, macOS and Windows.
 - No isochronous transfers, hubs or super speed yet.
 - The API may change before 1.0.
 

@@ -15,8 +15,9 @@
 //!
 //! Implemented from the protocol document alone
 //! (`usb-redirection-protocol.md` in the usbredir repository); no code
-//! of usbredir or QEMU is used. Little endian, packed structs, a 12
-//! byte header (type, length, id) on every packet. Three things set it
+//! of usbredir or QEMU is used. Little endian, packed structs, a
+//! header (type, length, id) on every packet: 12 bytes, or 16 once
+//! both sides have said they take 64 bit ids. Three things set it
 //! apart from USB/IP:
 //!
 //! - The device announces itself: `ep_info` and `interface_info`, then
@@ -37,9 +38,10 @@
 //! every packet and every [`TICK`].
 //!
 //! Capabilities offered: `connect_device_version`,
-//! `ep_info_max_packet_size`, `device_disconnect_ack` and
-//! `32bits_bulk_length`. Not offered: 64 bit ids, bulk streams, buffered
-//! bulk receiving, filters. Isochronous streams are refused with a
+//! `ep_info_max_packet_size`, `device_disconnect_ack`, `64bits_ids` and
+//! `32bits_bulk_length`; QEMU's XHCI controller takes a device only
+//! with the last three. Not offered: bulk streams, buffered bulk
+//! receiving, filters. Isochronous streams are refused with a
 //! STALL, as the bus does not carry them yet.
 
 use std::collections::HashMap;
@@ -110,15 +112,18 @@ const CAP_BULK_STREAMS: u32 = 0;
 const CAP_CONNECT_DEVICE_VERSION: u32 = 1;
 const CAP_DEVICE_DISCONNECT_ACK: u32 = 3;
 const CAP_EP_INFO_MAX_PACKET_SIZE: u32 = 4;
+const CAP_64BITS_IDS: u32 = 5;
 const CAP_32BITS_BULK_LENGTH: u32 = 6;
 
 /// The capabilities this server offers.
 const OURS: u32 = 1 << CAP_CONNECT_DEVICE_VERSION
     | 1 << CAP_DEVICE_DISCONNECT_ACK
     | 1 << CAP_EP_INFO_MAX_PACKET_SIZE
+    | 1 << CAP_64BITS_IDS
     | 1 << CAP_32BITS_BULK_LENGTH;
 
-const HEADER: usize = 12;
+/// The header before the id, which is 4 or 8 bytes.
+const HEADER: usize = 8;
 const HELLO_VERSION: usize = 64;
 /// Endpoint type of a slot `ep_info` has nothing for.
 const TYPE_INVALID: u8 = 255;
@@ -148,33 +153,48 @@ pub fn speed_code(speed: Speed) -> u8 {
 pub struct Packet {
     /// The type code.
     pub kind: u32,
-    /// The id, which a reply echoes.
-    pub id: u32,
+    /// The id, which a reply echoes; 32 bits on the wire unless both
+    /// sides take 64.
+    pub id: u64,
     /// The type's header and data, as one.
     pub payload: Vec<u8>,
 }
 
 impl Packet {
-    fn new(kind: u32, id: u32, payload: Vec<u8>) -> Packet {
+    fn new(kind: u32, id: u64, payload: Vec<u8>) -> Packet {
         Packet { kind, id, payload }
     }
 
-    fn write_to(&self, out: &mut dyn Write) -> io::Result<()> {
-        let mut b = Vec::with_capacity(HEADER + self.payload.len());
+    /// Writes it, the id in 64 bits when `wide`.
+    fn write_to(&self, out: &mut dyn Write, wide: bool) -> io::Result<()> {
+        let mut b = Vec::with_capacity(HEADER + 8 + self.payload.len());
         b.extend_from_slice(&self.kind.to_le_bytes());
         b.extend_from_slice(&(self.payload.len() as u32).to_le_bytes());
-        b.extend_from_slice(&self.id.to_le_bytes());
+        if wide {
+            b.extend_from_slice(&self.id.to_le_bytes());
+        } else {
+            b.extend_from_slice(&(self.id as u32).to_le_bytes());
+        }
         b.extend_from_slice(&self.payload);
         out.write_all(&b)?;
         out.flush()
     }
 
-    fn read_from(input: &mut dyn Read) -> io::Result<Packet> {
+    /// Reads one, its id in 64 bits when `wide`.
+    fn read_from(input: &mut dyn Read, wide: bool) -> io::Result<Packet> {
         let mut h = [0u8; HEADER];
         input.read_exact(&mut h)?;
         let kind = u32::from_le_bytes([h[0], h[1], h[2], h[3]]);
         let length = u32::from_le_bytes([h[4], h[5], h[6], h[7]]);
-        let id = u32::from_le_bytes([h[8], h[9], h[10], h[11]]);
+        let id = if wide {
+            let mut id = [0u8; 8];
+            input.read_exact(&mut id)?;
+            u64::from_le_bytes(id)
+        } else {
+            let mut id = [0u8; 4];
+            input.read_exact(&mut id)?;
+            u64::from(u32::from_le_bytes(id))
+        };
         if length > MAX_PACKET {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -185,6 +205,14 @@ impl Packet {
         input.read_exact(&mut payload)?;
         Ok(Packet { kind, id, payload })
     }
+}
+
+/// Whether the ids after the hellos are 64 bits wide: both sides must
+/// have offered it. `theirs` is the peer's hello.
+fn wide_after(ours: u32, theirs: &Packet) -> bool {
+    theirs.kind == HELLO
+        && parse_hello(&theirs.payload)
+            .is_some_and(|(_, caps)| ours & caps & (1 << CAP_64BITS_IDS) != 0)
 }
 
 fn le16(b: &[u8], at: usize) -> u16 {
@@ -301,11 +329,11 @@ fn device_connect(desc: &Descriptors, caps: Caps) -> Packet {
 #[derive(Clone, Debug)]
 enum Pending {
     /// A control transfer: the header to echo.
-    Control { id: u32, header: [u8; 10] },
+    Control { id: u64, header: [u8; 10] },
     /// A bulk transfer: the guest's id, endpoint address, stream id.
-    Bulk { id: u32, endpoint: u8, stream: u32 },
+    Bulk { id: u64, endpoint: u8, stream: u32 },
     /// An interrupt OUT transfer.
-    InterruptOut { id: u32, endpoint: u8 },
+    InterruptOut { id: u64, endpoint: u8 },
     /// Our own read of an interrupt IN endpoint being received.
     Receive { endpoint: u8 },
 }
@@ -462,9 +490,15 @@ impl Server {
         let bus = Arc::clone(&self.bus);
         thread::spawn(move || {
             let mut reader: Reader = reader;
+            // The hello has a 32 bit id whatever follows.
+            let mut wide = false;
+            let mut first = true;
             loop {
-                match Packet::read_from(&mut reader) {
+                match Packet::read_from(&mut reader, wide) {
                     Ok(p) => {
+                        if std::mem::take(&mut first) {
+                            wide = wide_after(OURS, &p);
+                        }
                         if tx.send(p).is_err() {
                             return;
                         }
@@ -489,7 +523,7 @@ impl Server {
             present: false,
             awaiting_ack: None,
         };
-        hello().write_to(&mut conn.out)?;
+        hello().write_to(&mut conn.out, false)?;
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
@@ -518,7 +552,7 @@ struct Connection<'a> {
     next: u32,
     /// Interrupt IN endpoints being received, by address: the id of
     /// the next packet.
-    receiving: HashMap<u8, u32>,
+    receiving: HashMap<u8, u64>,
     /// The guest has the device.
     present: bool,
     /// A disconnect was sent and its ack is awaited; whether the device
@@ -528,7 +562,7 @@ struct Connection<'a> {
 
 impl Connection<'_> {
     fn send(&mut self, packet: &Packet) -> io::Result<()> {
-        packet.write_to(&mut self.out)
+        packet.write_to(&mut self.out, self.caps.has(CAP_64BITS_IDS))
     }
 
     fn seq(&mut self) -> u32 {
@@ -840,7 +874,7 @@ impl Connection<'_> {
 
     /// The guest cancels its packet `id`: it gets it back, cancelled, or
     /// with what the device held for it.
-    fn cancel(&mut self, id: u32) -> io::Result<()> {
+    fn cancel(&mut self, id: u64) -> io::Result<()> {
         let ours = self.pending.iter().find_map(|(seq, p)| match p {
             Pending::Control { id: i, .. }
             | Pending::Bulk { id: i, .. }
@@ -962,6 +996,8 @@ pub struct Guest {
     writer: Writer,
     /// The capabilities both sides have.
     pub caps: u32,
+    /// Ids are 64 bits on the wire: both sides offered it.
+    wide: bool,
     /// The host's version string.
     pub host: String,
     /// Packets taken that were not the reply asked for: `ep_info`,
@@ -1001,8 +1037,15 @@ impl Guest {
                 return Err(Error::Invalid(format!("{}: Unix sockets need Unix", p.display())));
             }
         };
-        let mut guest =
-            Guest { reader, writer, caps: 0, host: String::new(), unsolicited: Vec::new() };
+        let mut guest = Guest {
+            reader,
+            writer,
+            caps: 0,
+            wide: false,
+            host: String::new(),
+            unsolicited: Vec::new(),
+        };
+        // Both hellos have 32 bit ids; the capabilities apply after.
         let mut p = b"vusb test guest".to_vec();
         p.resize(HELLO_VERSION, 0);
         p.extend_from_slice(&caps.to_le_bytes());
@@ -1015,6 +1058,7 @@ impl Guest {
         };
         guest.caps = caps & theirs;
         guest.host = host;
+        guest.wide = guest.caps & (1 << CAP_64BITS_IDS) != 0;
         Ok(guest)
     }
 
@@ -1024,7 +1068,7 @@ impl Guest {
     ///
     /// When the connection fails.
     pub fn send(&mut self, packet: &Packet) -> Result<()> {
-        Ok(packet.write_to(&mut self.writer)?)
+        Ok(packet.write_to(&mut self.writer, self.wide)?)
     }
 
     /// Reads the next packet, whatever it is.
@@ -1033,7 +1077,7 @@ impl Guest {
     ///
     /// When the connection fails or ends.
     pub fn read(&mut self) -> Result<Packet> {
-        Ok(Packet::read_from(&mut self.reader)?)
+        Ok(Packet::read_from(&mut self.reader, self.wide)?)
     }
 
     /// Reads until the reply to `id` of type `kind`; what came before is
@@ -1042,7 +1086,7 @@ impl Guest {
     /// # Errors
     ///
     /// When the connection fails or ends.
-    pub fn reply(&mut self, kind: u32, id: u32) -> Result<Packet> {
+    pub fn reply(&mut self, kind: u32, id: u64) -> Result<Packet> {
         loop {
             let p = self.read()?;
             if p.kind == kind && p.id == id {
@@ -1087,7 +1131,7 @@ impl Guest {
     /// # Errors
     ///
     /// When the connection fails.
-    pub fn control(&mut self, id: u32, setup: Setup, data: &[u8]) -> Result<(u8, Vec<u8>)> {
+    pub fn control(&mut self, id: u64, setup: Setup, data: &[u8]) -> Result<(u8, Vec<u8>)> {
         let mut p =
             vec![if setup.is_in() { 0x80 } else { 0 }, setup.request, setup.request_type, 0];
         p.extend_from_slice(&setup.value.to_le_bytes());
@@ -1109,7 +1153,7 @@ impl Guest {
     /// When the connection fails.
     pub fn bulk(
         &mut self,
-        id: u32,
+        id: u64,
         endpoint: u8,
         length: usize,
         data: &[u8],
@@ -1136,7 +1180,7 @@ impl Guest {
     /// # Errors
     ///
     /// When the connection fails.
-    pub fn set_configuration(&mut self, id: u32, configuration: u8) -> Result<(u8, u8)> {
+    pub fn set_configuration(&mut self, id: u64, configuration: u8) -> Result<(u8, u8)> {
         self.send(&Packet::new(SET_CONFIGURATION, id, vec![configuration]))?;
         let r = self.reply(CONFIGURATION_STATUS, id)?;
         Ok((r.payload[0], r.payload[1]))
@@ -1147,7 +1191,7 @@ impl Guest {
     /// # Errors
     ///
     /// When the connection fails.
-    pub fn start_interrupt(&mut self, id: u32, endpoint: u8) -> Result<u8> {
+    pub fn start_interrupt(&mut self, id: u64, endpoint: u8) -> Result<u8> {
         self.send(&Packet::new(START_INTERRUPT_RECEIVING, id, vec![endpoint]))?;
         Ok(self.reply(INTERRUPT_RECEIVING_STATUS, id)?.payload[0])
     }
@@ -1157,7 +1201,7 @@ impl Guest {
     /// # Errors
     ///
     /// When the connection fails.
-    pub fn stop_interrupt(&mut self, id: u32, endpoint: u8) -> Result<u8> {
+    pub fn stop_interrupt(&mut self, id: u64, endpoint: u8) -> Result<u8> {
         self.send(&Packet::new(STOP_INTERRUPT_RECEIVING, id, vec![endpoint]))?;
         Ok(self.reply(INTERRUPT_RECEIVING_STATUS, id)?.payload[0])
     }
@@ -1168,7 +1212,7 @@ impl Guest {
     /// # Errors
     ///
     /// When the connection fails.
-    pub fn cancel(&mut self, id: u32) -> Result<()> {
+    pub fn cancel(&mut self, id: u64) -> Result<()> {
         self.send(&Packet::new(CANCEL_DATA_PACKET, id, Vec::new()))
     }
 
@@ -1232,9 +1276,14 @@ pub mod caps {
     pub const EP_INFO_MAX_PACKET_SIZE: u32 = 1 << super::CAP_EP_INFO_MAX_PACKET_SIZE;
     /// `usb_redir_cap_32bits_bulk_length`.
     pub const BULK_LENGTH_32: u32 = 1 << super::CAP_32BITS_BULK_LENGTH;
+    /// `usb_redir_cap_64bits_ids`.
+    pub const IDS_64: u32 = 1 << super::CAP_64BITS_IDS;
     /// All a QEMU offers that this server takes.
-    pub const QEMU: u32 =
-        CONNECT_DEVICE_VERSION | DEVICE_DISCONNECT_ACK | EP_INFO_MAX_PACKET_SIZE | BULK_LENGTH_32;
+    pub const QEMU: u32 = CONNECT_DEVICE_VERSION
+        | DEVICE_DISCONNECT_ACK
+        | EP_INFO_MAX_PACKET_SIZE
+        | BULK_LENGTH_32
+        | IDS_64;
 }
 
 #[cfg(test)]
@@ -1288,7 +1337,7 @@ mod tests {
     fn announces_the_device_and_answers_transfers() {
         let served = serve(Box::new(UsbRelay::new(2)));
         let mut g = Guest::connect(&served.address, caps::QEMU).unwrap();
-        assert_eq!(g.caps, caps::QEMU, "all four taken");
+        assert_eq!(g.caps, caps::QEMU, "all five taken");
         assert!(g.host.starts_with("vusb "));
         let connect = g.device().unwrap();
         // speed full, class 0, 16c0:05df, bcdDevice 1.00
@@ -1309,6 +1358,10 @@ mod tests {
         // Enumeration through control packets, then set_configuration as
         // a message, which brings the info again before its status.
         let (status, d) = g.control(1, setup(0x80, 6, 0x0100, 0, 18), &[]).unwrap();
+        assert_eq!((status, d.len()), (SUCCESS, 18));
+        // An id that needs its 64 bits comes back whole.
+        let big = 0x1_0000_0007;
+        let (status, d) = g.control(big, setup(0x80, 6, 0x0100, 0, 18), &[]).unwrap();
         assert_eq!((status, d.len()), (SUCCESS, 18));
         let (status, d) = g.control(2, setup(0x80, 6, 0x0600, 0, 10), &[]).unwrap();
         assert_eq!((status, d.len()), (STALL, 0), "no qualifier at full speed");

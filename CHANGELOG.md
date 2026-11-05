@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- usbredir, a second transport: `transport::usbredir::Server` serves the
+  device to QEMU's `usb-redir` device, so it is inside a virtual machine
+  on any platform QEMU runs on, with no kernel module and no root.
+  `Builder::usbredir` and `vusb run --usbredir ADDRESS` select it;
+  unplug, replug, reset and renumeration work as over USB/IP.
+  `tools/qemu-check.sh` checks it in a real guest.
+- `Session::addr` returns an `Option`: there is no USB/IP server over
+  usbredir. The socket types moved to `transport::socket`; `control`
+  still exports `Address` and `ListenOptions`.
+
 ## 0.1.1 (2026-11-05)
 
 Documentation only; the code is that of 0.1.0.
