@@ -39,7 +39,7 @@ command never overlaps a re-attach.
 | `status` | | where the device is and how it stands |
 | `endpoints` | | the active configuration's endpoints |
 | `reset` | | a fresh model; attached again if its descriptors changed |
-| `options` | `KEY=VALUE`... | the model's options for the resets that follow; none restores the first ones |
+| `options` | `KEY=VALUE`..., or `pairs`: a list of `[KEY, VALUE]` | the model's options for the resets that follow; none restores the first ones |
 | `unplug`, `replug` | | leaves the bus as a pulled cable does; comes back |
 | `arm` | `event=unplug` or `event=mark name=NAME`, and `when=in=EP:N`, `out=EP:N` or `model` | fires once at that point of the host's traffic |
 | `section` | `name=NAME` | what follows belongs to it, in the log and on the stream |
@@ -69,7 +69,10 @@ stream is always in the plain format.
 ## Faults
 
 - **Options** such as `stall=` and `in-stall=N` belong to a model or shell. They take
-  effect with `options` then `reset`, from a fresh model.
+  effect with `options` then `reset`, from a fresh model. An object holds a key once
+  and in no order, and `vusb-ctl` reads a word like `1e3` as a number, so give `pairs`
+  for an option given twice, an order that matters, or a value that is text:
+  `vusb-ctl options --args '{"pairs":[["stall","reset"],["stall","baud"]]}'`.
 - **`arm`** picks a point in a run. `unplug` takes the device off the bus. `mark` only
   sends an event, and you decide what it means.
 

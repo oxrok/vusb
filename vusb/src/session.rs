@@ -1212,6 +1212,26 @@ fn option_text(v: &Value) -> String {
     v.as_str().map_or_else(|| v.to_string(), ToOwned::to_owned)
 }
 
+/// The arguments of an `options` command: each `KEY: VALUE`, or `pairs`, a
+/// list of `[KEY, VALUE]`, for what an object cannot say: a key twice,
+/// as the shells' `stall=` may be, and an order.
+fn options_arguments(args: &Value) -> Result<Vec<(String, String)>> {
+    let Some(pairs) = args.get("pairs") else {
+        let map = args.as_object().into_iter().flatten();
+        return Ok(map.map(|(k, v)| (k.clone(), option_text(v))).collect());
+    };
+    let bad = || Error::Invalid("pairs is a list of [KEY, VALUE]".into());
+    pairs
+        .as_array()
+        .ok_or_else(bad)?
+        .iter()
+        .map(|pair| match pair.as_array().map(Vec::as_slice) {
+            Some([k, v]) => Ok((k.as_str().ok_or_else(bad)?.to_owned(), option_text(v))),
+            _ => Err(bad()),
+        })
+        .collect()
+}
+
 fn log_command(args: &Value, ctx: &mut Ctx) -> Result<Value> {
     // What is refused is refused before anything changes.
     let format = arg_str(args, "format").map(str::parse::<LogFormat>).transpose()?;
@@ -1381,13 +1401,11 @@ fn builtins(b: &mut Builder) {
     );
     add(
         "options",
-        "KEY=VALUE options for the resets that follow; none goes back to the first ones",
+        "KEY=VALUE options, or pairs=[[KEY, VALUE]...], for the resets that follow; \
+         none goes back to the first ones",
         Box::new(|args, ctx| {
-            let map = args
-                .as_object()
-                .map(|m| m.iter().map(|(k, v)| (k.clone(), option_text(v))).collect::<Vec<_>>());
-            let options = match map {
-                Some(o) if !o.is_empty() => o,
+            let options = match options_arguments(args)? {
+                o if !o.is_empty() => o,
                 _ => ctx.initial_options.clone(),
             };
             // A bad option is refused now, not at the reset.
@@ -1616,6 +1634,26 @@ mod tests {
         let e = r.client.call("endpoints", &json!({})).unwrap();
         assert_eq!(e["configuration"], 1);
         assert_eq!(e["endpoints"][0]["address"], 0x81);
+        r.end();
+    }
+
+    #[test]
+    fn options_as_pairs_keep_their_order_and_a_key_twice() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let shared = Arc::clone(&seen);
+        let factory: ModelFactory = Box::new(move |options: &[(String, String)]| {
+            shared.lock().unwrap().push(options.to_vec());
+            relay::build(&[])
+        });
+        let mut r = start(Builder::new(factory));
+        let pairs = json!({"pairs": [["z", "1"], ["a", "1e3"], ["z", "2"]]});
+        r.client.call("options", &pairs).unwrap();
+        let want =
+            [("z", "1"), ("a", "1e3"), ("z", "2")].map(|(k, v)| (k.to_owned(), v.to_owned()));
+        assert_eq!(seen.lock().unwrap().last().unwrap(), &want);
+        for bad in [json!({"pairs": 1}), json!({"pairs": [["z"]]}), json!({"pairs": [[1, "z"]]})] {
+            assert!(r.client.call("options", &bad).is_err(), "{bad}");
+        }
         r.end();
     }
 
