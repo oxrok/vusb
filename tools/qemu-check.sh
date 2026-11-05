@@ -73,7 +73,9 @@ done
 
 accel=tcg
 [ -w /dev/kvm ] && accel=kvm
-qemu-system-x86_64 -machine accel=$accel -m 512 -display none -no-reboot \
+# The guest's programs are this machine's, so it gets every CPU feature
+# there is: some distributions build theirs for more than QEMU's default.
+qemu-system-x86_64 -machine accel=$accel -cpu max -m 512 -display none -no-reboot \
     -kernel "$kernel" -initrd "$dir/initrd.img" \
     -append "console=ttyS0 rdinit=/vusb-init panic=-1" \
     -serial "file:$console" \

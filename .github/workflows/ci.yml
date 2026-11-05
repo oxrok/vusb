@@ -85,6 +85,17 @@ jobs:
           else
             echo "::warning::no uvcvideo for kernel $(uname -r): the video check did not run"
           fi
+      - if: failure()
+        name: Keep what the checks left
+        run: |
+          mkdir left
+          sudo sh -c 'cp -r /tmp/tmp.* left/ && chmod -R a+rX left'
+          sudo dmesg | tail -n 40
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attach-checks
+          path: left
 
   qemu:
     # The device inside a guest: usbredir to QEMU's usb-redir device. The

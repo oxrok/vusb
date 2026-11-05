@@ -17,6 +17,20 @@ for colour in "b4 80 80" "a2 2c 8e" "83 9c 2c" "70 48 3a" "54 b8 c6" "41 64 d4" 
     # shellcheck disable=SC2086
     bars=$bars$(ten $colour)$(ten $colour)
 done
+# Says where line $1 leaves what it should be, $2, and fails.
+differs() {
+    [ "${#1}" = 640 ] || { echo "$3: the line has $((${#1} / 2)) bytes" >&2; exit 1; }
+    at=1
+    while [ "$at" -lt 640 ]; do
+        got=$(printf '%s' "$1" | cut -c"$at-$((at + 1))")
+        want=$(printf '%s' "$2" | cut -c"$at-$((at + 1))")
+        [ "$got" = "$want" ] || {
+            echo "$3: byte $((at / 2)) is $got, not $want" >&2
+            exit 1
+        }
+        at=$((at + 2))
+    done
+}
 size=$(wc -c <"$1")
 [ "$size" -gt 0 ] && [ $((size % 38400)) = 0 ] || {
     echo "$1: $size bytes is not a number of 38400 byte frames" >&2
@@ -29,9 +43,9 @@ od -An -v -tx1 -w320 "$1" | tr -d ' ' | while read -r line; do
     if [ "$row" = 0 ]; then
         strip=$line
     elif [ "$row" -lt 8 ]; then
-        [ "$line" = "$strip" ] || { echo "frame $frame: line $row differs from the first" >&2; exit 1; }
+        [ "$line" = "$strip" ] || differs "$line" "$strip" "frame $frame, line $row, a copy of line 0"
     else
-        [ "$line" = "$bars" ] || { echo "frame $frame: line $row is not the bars" >&2; exit 1; }
+        [ "$line" = "$bars" ] || differs "$line" "$bars" "frame $frame, line $row, the bars"
     fi
     row=$((row + 1))
     if [ "$row" = 120 ]; then
