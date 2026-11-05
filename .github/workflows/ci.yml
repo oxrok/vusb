@@ -68,6 +68,35 @@ jobs:
       - if: steps.vhci.outputs.available == 'true'
         run: sudo -E sh tools/attach-check.sh
 
+  qemu:
+    # The device inside a guest: usbredir to QEMU's usb-redir device, the
+    # guest built from the runner's own kernel.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU and dracut
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 dracut-core
+          sudo chmod a+r "/boot/vmlinuz-$(uname -r)"
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
+          qemu-system-x86_64 -device help | grep usb-redir
+      - run: cargo build --workspace
+      - run: sh tools/qemu-check.sh cdc-echo
+      - run: sh tools/qemu-check.sh ftdi-loopback
+      - run: sh tools/qemu-check.sh hid-relay
+      - if: failure()
+        name: What the guest and QEMU said
+        run: |
+          for d in /tmp/vusb-qemu.*; do
+            echo "=== $d"
+            tail -n 60 "$d/console.log" || true
+            cat "$d/qemu.log" "$d/vusb.err" || true
+            tail -n 20 "$d/dracut.log" || true
+          done
+
   msrv:
     runs-on: ubuntu-latest
     steps:

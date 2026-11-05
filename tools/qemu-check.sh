@@ -45,7 +45,7 @@ finish() {
 trap finish EXIT
 
 dracut --no-hostonly --no-early-microcode --modules base \
-    --add-drivers "cdc_acm ftdi_sio usbserial" \
+    --add-drivers "xhci_pci xhci_hcd usbhid hid_generic cdc_acm ftdi_sio usbserial" \
     --install "stty head cat sleep modprobe timeout wc mount mkdir basename printf" \
     --include "$here/tools/qemu-guest-init.sh" /vusb-init \
     --force "$dir/initrd.img" "$(uname -r)" >"$dir/dracut.log" 2>&1

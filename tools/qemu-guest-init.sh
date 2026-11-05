@@ -7,8 +7,10 @@ mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 echo "VUSB-GUEST: up"
-modprobe cdc_acm 2>/dev/null
-modprobe ftdi_sio 2>/dev/null
+# Built into some kernels, modules of others.
+for m in xhci_pci usbhid hid_generic cdc_acm ftdi_sio; do
+    modprobe "$m" 2>/dev/null
+done
 
 # The devices on the bus, root hubs left out: "VID:PID product".
 devices() {
