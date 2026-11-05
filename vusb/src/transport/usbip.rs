@@ -67,8 +67,14 @@ const EPIPE: i32 = -32;
 /// report it.
 const EOVERFLOW: i32 = -75;
 const ECONNRESET: i32 = -104;
+/// An isochronous packet the device did not send.
+const EXDEV: i32 = -18;
 
 const HEADER: usize = 48;
+/// One `usbip_iso_packet_descriptor`.
+const ISO_DESCRIPTOR: usize = 16;
+/// More packets than any host puts in an isochronous URB.
+const MAX_ISO_PACKETS: i32 = 1024;
 const DEVICE_RECORD: usize = 312;
 
 /// The poll period for held transfers.
@@ -130,7 +136,9 @@ struct Submit {
     direction: u32,
     ep: u8,
     length: usize,
-    packets: i32,
+    /// The packets of an isochronous URB: offset into the buffer and
+    /// length, as its descriptors give them.
+    iso: Vec<(u32, u32)>,
     setup: [u8; 8],
     data: Vec<u8>,
 }
@@ -139,15 +147,24 @@ impl Submit {
     /// The bus's view of it.
     fn urb(self) -> Urb {
         let setup = (self.ep == 0).then(|| Setup::from_bytes(&self.setup));
-        Urb {
-            seqnum: self.seqnum,
-            ep: self.ep,
-            is_in: setup.map_or(self.direction == DIR_IN, Setup::is_in),
-            setup,
-            length: self.length,
-            data: self.data,
-            iso_packets: u32::try_from(self.packets).unwrap_or(0),
-        }
+        let is_in = setup.map_or(self.direction == DIR_IN, Setup::is_in);
+        let iso: Vec<usize> = self.iso.iter().map(|&(_, length)| length as usize).collect();
+        // The bus takes an OUT's packets one after the other; the
+        // descriptors say where each is in the buffer.
+        let data = if iso.is_empty() || is_in {
+            self.data
+        } else {
+            let mut packed = Vec::with_capacity(self.data.len());
+            for &(offset, length) in &self.iso {
+                let (from, to) = (offset as usize, offset as usize + length as usize);
+                let chunk = self.data.get(from..to).unwrap_or_default();
+                packed.extend_from_slice(chunk);
+                packed.resize(packed.len() + (length as usize - chunk.len()), 0);
+            }
+            packed
+        };
+        let length = if iso.is_empty() { self.length } else { iso.iter().sum() };
+        Urb { seqnum: self.seqnum, ep: self.ep, is_in, setup, length, data, iso }
     }
 }
 
@@ -174,10 +191,24 @@ fn read_pdus(mut stream: TcpStream, tx: &mpsc::Sender<Pdu>) -> io::Result<()> {
                     data.resize(length, 0);
                     stream.read_exact(&mut data)?;
                 }
+                // Isochronous descriptors follow: offset, length, actual
+                // length and status of each packet.
+                let mut iso = Vec::new();
                 if packets > 0 {
-                    // Isochronous descriptors follow; read and drop them.
-                    let mut iso = vec![0u8; 16 * packets as usize];
-                    stream.read_exact(&mut iso)?;
+                    if packets > MAX_ISO_PACKETS {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("isochronous URB of {packets} packets"),
+                        ));
+                    }
+                    let mut raw = vec![0u8; ISO_DESCRIPTOR * packets as usize];
+                    stream.read_exact(&mut raw)?;
+                    iso = raw
+                        .as_chunks::<ISO_DESCRIPTOR>()
+                        .0
+                        .iter()
+                        .map(|d| (be32(&d[0..4]), be32(&d[4..8])))
+                        .collect();
                 }
                 let mut setup = [0u8; 8];
                 setup.copy_from_slice(&h[40..48]);
@@ -187,7 +218,7 @@ fn read_pdus(mut stream: TcpStream, tx: &mpsc::Sender<Pdu>) -> io::Result<()> {
                     direction,
                     ep: be32(&h[16..20]) as u8,
                     length,
-                    packets,
+                    iso,
                     setup,
                     data,
                 })
@@ -213,6 +244,7 @@ fn errno(status: Status) -> i32 {
         Status::Stall => EPIPE,
         Status::Babble => EOVERFLOW,
         Status::Unlinked => ECONNRESET,
+        Status::Missed => EXDEV,
     }
 }
 
@@ -236,6 +268,36 @@ fn write_ret_submit(
 
 fn write_completion(out: &mut TcpStream, c: &Completion) -> io::Result<()> {
     write_ret_submit(out, c.seqnum, errno(c.status), c.actual, &c.data)
+}
+
+/// The `RET_SUBMIT` of an isochronous URB: the packets' data one after
+/// the other (an IN), then a descriptor per packet with the offset and
+/// length the host gave it, what moved, and its status. `asked` is the
+/// (offset, length) of each packet as submitted.
+fn write_ret_submit_iso(
+    out: &mut TcpStream,
+    c: &Completion,
+    asked: &[(u32, u32)],
+) -> io::Result<()> {
+    let errors = c.iso.iter().filter(|p| p.status != Status::Ok).count();
+    let mut b = Vec::with_capacity(HEADER + c.data.len() + ISO_DESCRIPTOR * c.iso.len());
+    b.extend_from_slice(&RET_SUBMIT.to_be_bytes());
+    b.extend_from_slice(&c.seqnum.to_be_bytes());
+    b.extend_from_slice(&[0u8; 12]);
+    b.extend_from_slice(&0i32.to_be_bytes());
+    b.extend_from_slice(&(c.actual as i32).to_be_bytes());
+    b.extend_from_slice(&0i32.to_be_bytes());
+    b.extend_from_slice(&(c.iso.len() as i32).to_be_bytes());
+    b.extend_from_slice(&(errors as i32).to_be_bytes());
+    b.extend_from_slice(&[0u8; 8]);
+    b.extend_from_slice(&c.data);
+    for (packet, &(offset, length)) in c.iso.iter().zip(asked) {
+        b.extend_from_slice(&offset.to_be_bytes());
+        b.extend_from_slice(&length.to_be_bytes());
+        b.extend_from_slice(&(packet.actual as u32).to_be_bytes());
+        b.extend_from_slice(&errno(packet.status).to_be_bytes());
+    }
+    out.write_all(&b)
 }
 
 fn write_ret_unlink(out: &mut TcpStream, seqnum: u32, status: i32) -> io::Result<()> {
@@ -397,8 +459,10 @@ impl Server {
                             self.devid()
                         ));
                     }
+                    // An isochronous URB completes within its submission.
+                    let asked = submit.iso.clone();
                     let produced = self.bus().submit(submit.urb());
-                    self.deliver(&mut out, produced)?;
+                    self.deliver(&mut out, produced, &asked)?;
                 }
                 Ok(Pdu::Unlink { seqnum, target }) => {
                     let status = match self.bus().unlink(target) {
@@ -417,14 +481,20 @@ impl Server {
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
             let produced = self.bus().poll();
-            self.deliver(&mut out, produced)?;
+            self.deliver(&mut out, produced, &[])?;
         }
     }
 
     /// Answers the completions of a step and passes its signals on.
-    fn deliver(&self, out: &mut TcpStream, step: Step) -> io::Result<()> {
+    /// `asked` is the packets of the isochronous URB just submitted,
+    /// whose completion is in this step.
+    fn deliver(&self, out: &mut TcpStream, step: Step, asked: &[(u32, u32)]) -> io::Result<()> {
         for c in &step.completions {
-            write_completion(out, c)?;
+            if c.iso.is_empty() {
+                write_completion(out, c)?;
+            } else {
+                write_ret_submit_iso(out, c, asked)?;
+            }
         }
         for signal in step.signals {
             match &self.signals {
@@ -487,6 +557,43 @@ pub fn cmd_submit(
     b
 }
 
+/// A client's isochronous `CMD_SUBMIT`, for tests and tools: one packet
+/// of each of `lengths`, laid out one after the other; `data` is what an
+/// OUT sends.
+pub fn cmd_submit_iso(
+    seqnum: u32,
+    devid: u32,
+    direction: u32,
+    ep: u8,
+    lengths: &[usize],
+    data: &[u8],
+) -> Vec<u8> {
+    let total: usize = lengths.iter().sum();
+    let mut b = Vec::with_capacity(HEADER + data.len() + ISO_DESCRIPTOR * lengths.len());
+    b.extend_from_slice(&CMD_SUBMIT.to_be_bytes());
+    b.extend_from_slice(&seqnum.to_be_bytes());
+    b.extend_from_slice(&devid.to_be_bytes());
+    b.extend_from_slice(&direction.to_be_bytes());
+    b.extend_from_slice(&u32::from(ep).to_be_bytes());
+    b.extend_from_slice(&0u32.to_be_bytes());
+    b.extend_from_slice(&(total as i32).to_be_bytes());
+    b.extend_from_slice(&0u32.to_be_bytes());
+    b.extend_from_slice(&(lengths.len() as u32).to_be_bytes());
+    b.extend_from_slice(&1u32.to_be_bytes());
+    b.extend_from_slice(&[0u8; 8]);
+    if direction == DIR_OUT {
+        b.extend_from_slice(data);
+    }
+    let mut offset = 0u32;
+    for &length in lengths {
+        b.extend_from_slice(&offset.to_be_bytes());
+        b.extend_from_slice(&(length as u32).to_be_bytes());
+        b.extend_from_slice(&[0u8; 8]);
+        offset += length as u32;
+    }
+    b
+}
+
 /// A client's `CMD_UNLINK` of `target`.
 pub fn cmd_unlink(seqnum: u32, target: u32) -> Vec<u8> {
     let mut b = Vec::with_capacity(HEADER);
@@ -509,6 +616,9 @@ pub struct Ret {
     pub status: i32,
     /// The data of an IN transfer.
     pub data: Vec<u8>,
+    /// The packets of an isochronous transfer: what moved and the
+    /// status of each.
+    pub iso: Vec<(u32, i32)>,
 }
 
 /// Reads one reply, for tests and tools. `data_follows` says whether
@@ -526,7 +636,22 @@ pub fn read_ret(stream: &mut TcpStream, data_follows: bool) -> io::Result<Ret> {
         data.resize(actual, 0);
         stream.read_exact(&mut data)?;
     }
-    Ok(Ret { command, seqnum, status, data })
+    Ok(Ret { command, seqnum, status, data, iso: Vec::new() })
+}
+
+/// Reads the reply to an isochronous URB of `packets` packets: the data
+/// of an IN, then the descriptors.
+pub fn read_ret_iso(stream: &mut TcpStream, data_follows: bool, packets: usize) -> io::Result<Ret> {
+    let mut ret = read_ret(stream, data_follows)?;
+    let mut raw = vec![0u8; ISO_DESCRIPTOR * packets];
+    stream.read_exact(&mut raw)?;
+    ret.iso = raw
+        .as_chunks::<ISO_DESCRIPTOR>()
+        .0
+        .iter()
+        .map(|d| (be32(&d[8..12]), be32(&d[12..16]) as i32))
+        .collect();
+    Ok(ret)
 }
 
 #[cfg(test)]
@@ -655,6 +780,88 @@ mod tests {
             rec.transfers.iter().filter(|t| t.outcome == Outcome::Held).map(|t| t.seqnum).collect();
         assert_eq!(held, [6]);
         assert!(rec.notices.iter().any(|n| n == "1-1 imported"), "{:?}", rec.notices);
+    }
+
+    /// An isochronous IN on 0x83 that sends its interval's number, and
+    /// nothing in every third; an isochronous OUT on 0x04.
+    struct Stream(crate::model::Descriptors, u8, Arc<Mutex<Vec<Vec<u8>>>>);
+
+    impl DeviceModel for Stream {
+        fn name(&self) -> &'static str {
+            "stream"
+        }
+        fn descriptors(&self) -> &crate::model::Descriptors {
+            &self.0
+        }
+        fn control(&mut self, _: Setup, _: &[u8], _: &mut Violations) -> Reply {
+            Reply::ack()
+        }
+        fn out(&mut self, _: u8, _: &[u8], _: &mut Violations) -> Reply {
+            Reply::ack()
+        }
+        fn in_transfer(&mut self, _: u8, _: usize, _: &mut Violations) -> Reply {
+            Reply::Nak
+        }
+        fn iso_in(&mut self, _: u8, _: usize, _: &mut Violations) -> Option<Vec<u8>> {
+            self.1 += 1;
+            (!self.1.is_multiple_of(3)).then(|| vec![self.1; usize::from(self.1)])
+        }
+        fn iso_out(&mut self, _: u8, data: &[u8], _: &mut Violations) {
+            self.2.lock().unwrap().push(data.to_vec());
+        }
+        fn reset(&mut self) {}
+    }
+
+    #[test]
+    fn isochronous_urbs_carry_their_packets_both_ways() {
+        use crate::descriptor::{self, DeviceDescriptor};
+        let mut body = Vec::new();
+        body.extend_from_slice(&descriptor::interface(0, 0, 2, [0xff, 0, 0], 0));
+        body.extend_from_slice(&descriptor::endpoint(0x83, 1, 8, 1));
+        body.extend_from_slice(&descriptor::endpoint(0x04, 1, 8, 1));
+        let device = DeviceDescriptor {
+            usb: 0x0200,
+            class: [0, 0, 0],
+            max_packet0: 64,
+            vendor: 0x1234,
+            product: 0x5678,
+            device: 0x0100,
+            strings: [0, 0, 0],
+            configurations: 1,
+        };
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let model = Stream(
+            crate::model::Descriptors {
+                speed: Speed::Full,
+                device: device.bytes(),
+                configs: vec![descriptor::configuration(1, 0, 0x80, 50, &body)],
+                strings: Vec::new(),
+            },
+            0,
+            Arc::clone(&got),
+        );
+        let served = serve(Box::new(model));
+        let devid = served.devid;
+        let (mut s, _) = import(served.addr, "1-1").unwrap();
+        s.write_all(&cmd_submit(1, devid, DIR_OUT, 0, 0, Some(setup(0x00, 9, 1, 0, 0)), &[]))
+            .unwrap();
+        assert_eq!(read_ret(&mut s, false).unwrap().status, 0);
+        // Four intervals: 1 and 2 bytes, nothing, 4 bytes. The data comes
+        // packed, the descriptors say what each packet got.
+        s.write_all(&cmd_submit_iso(2, devid, DIR_IN, 3, &[8, 8, 8, 8], &[])).unwrap();
+        let r = read_ret_iso(&mut s, true, 4).unwrap();
+        assert_eq!((r.seqnum, r.status), (2, 0));
+        assert_eq!(r.data, [1, 2, 2, 4, 4, 4, 4]);
+        assert_eq!(r.iso, [(1, 0), (2, 0), (0, EXDEV), (4, 0)]);
+        // OUT: three packets, one of them empty.
+        s.write_all(&cmd_submit_iso(3, devid, DIR_OUT, 4, &[2, 0, 3], &[9, 8, 7, 6, 5])).unwrap();
+        let r = read_ret_iso(&mut s, false, 3).unwrap();
+        assert_eq!((r.seqnum, r.status), (3, 0));
+        assert_eq!(r.iso, [(2, 0), (0, 0), (3, 0)]);
+        drop(s);
+        let rec = served.stop();
+        assert_eq!(*got.lock().unwrap(), [vec![9, 8], vec![], vec![7, 6, 5]]);
+        assert_eq!(rec.lock().unwrap().violations, Vec::<String>::new());
     }
 
     /// Holds each bulk IN, and has 64 bytes for one that is unlinked.

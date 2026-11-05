@@ -41,8 +41,13 @@
 //! `ep_info_max_packet_size`, `device_disconnect_ack`, `64bits_ids` and
 //! `32bits_bulk_length`; QEMU's XHCI controller takes a device only
 //! with the last three. Not offered: bulk streams, buffered bulk
-//! receiving, filters. Isochronous streams are refused with a
-//! STALL, as the bus does not carry them yet.
+//! receiving, filters.
+//!
+//! An isochronous stream is the one place the clock comes in: the guest
+//! says `start_iso_stream` once, and for an IN endpoint the server then
+//! offers the device one packet per service interval of the endpoint,
+//! by its own clock, and sends each on. The model still sees one call
+//! per interval and keeps no time itself.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -50,12 +55,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::arm::Event;
 use crate::bus::{Bus, Completion, Signal, Status, Step, Unlink, Urb};
 use crate::descriptor;
-use crate::model::{CONTROL, Descriptors, INTERRUPT, Setup, Speed};
+use crate::model::{CONTROL, Descriptors, INTERRUPT, ISOCHRONOUS, Setup, Speed};
 use crate::transport::socket::{Accepted, Address, ListenOptions, Listener, Reader, Writer};
 use crate::{Error, Result};
 
@@ -104,6 +109,7 @@ const INTERRUPT_PACKET: u32 = 103;
 const SUCCESS: u8 = 0;
 const CANCELLED: u8 = 1;
 const INVAL: u8 = 2;
+const IOERROR: u8 = 3;
 const STALL: u8 = 4;
 const BABBLE: u8 = 6;
 
@@ -136,6 +142,7 @@ fn status_of(status: Status) -> u8 {
         Status::Stall => STALL,
         Status::Babble => BABBLE,
         Status::Unlinked => CANCELLED,
+        Status::Missed => IOERROR,
     }
 }
 
@@ -338,6 +345,51 @@ enum Pending {
     Receive { endpoint: u8 },
 }
 
+/// An isochronous IN stream: the server offers the device a packet per
+/// service interval and sends it on.
+#[derive(Clone, Copy, Debug)]
+struct IsoStream {
+    /// The id of the next packet.
+    next: u64,
+    started: Instant,
+    /// Packets offered since the start.
+    offered: u64,
+    /// The service interval.
+    period: Duration,
+    /// `wMaxPacketSize`: what one packet holds.
+    max: usize,
+}
+
+impl IsoStream {
+    /// Packets offered at once at most, after a stall of the loop: a
+    /// stream that fell behind does not flood the guest to catch up.
+    const BURST: u32 = 64;
+
+    /// A stream on an endpoint with this `bInterval`: 2^(n-1) frames at
+    /// full speed, microframes at high speed.
+    fn new(speed: Speed, interval: u8, max_packet: u16) -> IsoStream {
+        let unit: u64 = if speed == Speed::High { 125 } else { 1000 };
+        let micros = unit << u32::from(interval.clamp(1, 16) - 1);
+        IsoStream {
+            next: 0,
+            started: Instant::now(),
+            offered: 0,
+            period: Duration::from_micros(micros),
+            // The low 11 bits; the rest say how many per microframe.
+            max: usize::from(max_packet & 0x07ff),
+        }
+    }
+
+    /// How many packets are due now; they count as offered.
+    fn due(&mut self) -> u32 {
+        let elapsed = self.started.elapsed().as_micros() / self.period.as_micros().max(1);
+        let behind = u64::try_from(elapsed).unwrap_or(u64::MAX).saturating_sub(self.offered);
+        // What a long stall left behind is dropped, not sent late.
+        self.offered += behind;
+        u32::try_from(behind).unwrap_or(u32::MAX).min(Self::BURST)
+    }
+}
+
 /// Something the driver of the run asks the server to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
@@ -520,6 +572,7 @@ impl Server {
             pending: HashMap::new(),
             next: 1,
             receiving: HashMap::new(),
+            streams: HashMap::new(),
             present: false,
             awaiting_ack: None,
         };
@@ -538,6 +591,7 @@ impl Server {
             }
             let polled = conn.server.bus().poll();
             conn.deliver(polled)?;
+            conn.pump()?;
         }
     }
 }
@@ -553,6 +607,8 @@ struct Connection<'a> {
     /// Interrupt IN endpoints being received, by address: the id of
     /// the next packet.
     receiving: HashMap<u8, u64>,
+    /// Isochronous IN streams, by endpoint address.
+    streams: HashMap<u8, IsoStream>,
     /// The guest has the device.
     present: bool,
     /// A disconnect was sent and its ack is awaited; whether the device
@@ -618,6 +674,7 @@ impl Connection<'_> {
         self.present = false;
         self.pending.clear();
         self.receiving.clear();
+        self.streams.clear();
         self.send(&Packet::new(DEVICE_DISCONNECT, 0, Vec::new()))?;
         self.server.link(Link::Gone);
         if self.caps.has(CAP_DEVICE_DISCONNECT_ACK) {
@@ -635,6 +692,7 @@ impl Connection<'_> {
         self.server.bus().reset();
         self.pending.clear();
         self.receiving.clear();
+        self.streams.clear();
         self.announce()
     }
 
@@ -680,6 +738,7 @@ impl Connection<'_> {
                 self.server.bus().reset();
                 self.pending.clear();
                 self.receiving.clear();
+                self.streams.clear();
             }
             SET_CONFIGURATION => {
                 let value = p.first().copied().unwrap_or(0);
@@ -731,10 +790,26 @@ impl Connection<'_> {
                 let status = status_of(c.status);
                 self.send(&Packet::new(ALT_SETTING_STATUS, id, vec![status, interface, alt]))?;
             }
-            START_ISO_STREAM | STOP_ISO_STREAM => {
+            START_ISO_STREAM => {
                 let endpoint = p.first().copied().unwrap_or(0);
-                self.server.comment("isochronous streams are not supported");
-                self.send(&Packet::new(ISO_STREAM_STATUS, id, vec![STALL, endpoint]))?;
+                let found = self.server.bus().device().endpoint(endpoint);
+                let speed = self.server.bus().device().descriptors().speed;
+                let status = match found {
+                    Some(e) if e.transfer_type() == ISOCHRONOUS => {
+                        if endpoint & 0x80 != 0 {
+                            self.streams
+                                .insert(endpoint, IsoStream::new(speed, e.interval, e.max_packet));
+                        }
+                        SUCCESS
+                    }
+                    _ => INVAL,
+                };
+                self.send(&Packet::new(ISO_STREAM_STATUS, id, vec![status, endpoint]))?;
+            }
+            STOP_ISO_STREAM => {
+                let endpoint = p.first().copied().unwrap_or(0);
+                self.streams.remove(&endpoint);
+                self.send(&Packet::new(ISO_STREAM_STATUS, id, vec![SUCCESS, endpoint]))?;
             }
             START_INTERRUPT_RECEIVING => {
                 let endpoint = p.first().copied().unwrap_or(0);
@@ -854,10 +929,51 @@ impl Connection<'_> {
                 }
             }
             ISO_PACKET => {
-                let endpoint = p.first().copied().unwrap_or(0);
-                self.send(&Packet::new(ISO_PACKET, id, vec![endpoint, STALL, 0, 0]))?;
+                // An OUT stream's packet: one service interval's data.
+                // Nothing is answered.
+                if p.len() < 4 {
+                    return Err(Error::Protocol("an iso packet shorter than its header".into()));
+                }
+                let endpoint = p[0];
+                if endpoint & 0x80 == 0 {
+                    let seq = self.seq();
+                    let urb = Urb::iso_write(seq, endpoint & 0x0f, &[&p[4..]]);
+                    let step = self.server.bus().submit(urb);
+                    self.deliver(step)?;
+                }
             }
             other => self.server.comment(&format!("usbredir packet type {other} ignored")),
+        }
+        Ok(())
+    }
+
+    /// Offers the device the packets that are due on every isochronous
+    /// IN stream, and sends each to the guest.
+    fn pump(&mut self) -> io::Result<()> {
+        let due: Vec<(u8, u32, usize)> =
+            self.streams.iter_mut().map(|(ep, s)| (*ep, s.due(), s.max)).collect();
+        for (endpoint, count, max) in due {
+            for _ in 0..count {
+                let seq = self.seq();
+                let urb = Urb::iso_read(seq, endpoint & 0x0f, vec![max]);
+                let step = self.server.bus().submit(urb);
+                let sent = step.completions.iter().find(|c| c.seqnum == seq).cloned();
+                if let Some(c) = sent
+                    && let (Some(packet), Some(stream)) =
+                        (c.iso.first(), self.streams.get_mut(&endpoint))
+                {
+                    let id = stream.next;
+                    stream.next = stream.next.wrapping_add(1);
+                    let mut payload = vec![endpoint, status_of(packet.status)];
+                    payload.extend_from_slice(&(c.data.len() as u16).to_le_bytes());
+                    payload.extend_from_slice(&c.data);
+                    self.send(&Packet::new(ISO_PACKET, id, payload))?;
+                }
+                self.deliver(step)?;
+                if !self.present {
+                    return Ok(());
+                }
+            }
         }
         Ok(())
     }
@@ -898,6 +1014,7 @@ impl Connection<'_> {
                     status: Status::Unlinked,
                     actual: 0,
                     data: Vec::new(),
+                    iso: Vec::new(),
                 };
                 self.complete(&c)
             }
@@ -976,7 +1093,8 @@ impl Connection<'_> {
                             vec![STALL, endpoint],
                         ))
                     }
-                    Status::Unlinked => Ok(()),
+                    // Missed is an isochronous packet's status only.
+                    Status::Unlinked | Status::Missed => Ok(()),
                     Status::Ok | Status::Babble => {
                         let mut payload = vec![endpoint, status];
                         payload.extend_from_slice(&(c.data.len() as u16).to_le_bytes());
@@ -1206,6 +1324,38 @@ impl Guest {
         Ok(self.reply(INTERRUPT_RECEIVING_STATUS, id)?.payload[0])
     }
 
+    /// `start_iso_stream` on endpoint address `endpoint`: the status.
+    ///
+    /// # Errors
+    ///
+    /// When the connection fails.
+    pub fn start_iso(&mut self, id: u64, endpoint: u8) -> Result<u8> {
+        self.send(&Packet::new(START_ISO_STREAM, id, vec![endpoint, 8, 4]))?;
+        Ok(self.reply(ISO_STREAM_STATUS, id)?.payload[0])
+    }
+
+    /// `stop_iso_stream`: the status.
+    ///
+    /// # Errors
+    ///
+    /// When the connection fails.
+    pub fn stop_iso(&mut self, id: u64, endpoint: u8) -> Result<u8> {
+        self.send(&Packet::new(STOP_ISO_STREAM, id, vec![endpoint]))?;
+        Ok(self.reply(ISO_STREAM_STATUS, id)?.payload[0])
+    }
+
+    /// One packet of an isochronous OUT stream. Nothing comes back.
+    ///
+    /// # Errors
+    ///
+    /// When the connection fails.
+    pub fn iso_out(&mut self, id: u64, endpoint: u8, data: &[u8]) -> Result<()> {
+        let mut p = vec![endpoint, 0];
+        p.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        p.extend_from_slice(data);
+        self.send(&Packet::new(ISO_PACKET, id, p))
+    }
+
     /// Cancels data packet `id`; the packet comes back through
     /// [`Guest::reply`].
     ///
@@ -1248,6 +1398,8 @@ pub mod kinds {
     pub const RESET: u32 = super::RESET;
     /// `usb_redir_iso_stream_status`.
     pub const ISO_STREAM_STATUS: u32 = super::ISO_STREAM_STATUS;
+    /// `usb_redir_iso_packet`.
+    pub const ISO_PACKET: u32 = super::ISO_PACKET;
     /// `usb_redir_start_iso_stream`.
     pub const START_ISO_STREAM: u32 = super::START_ISO_STREAM;
 }
@@ -1260,6 +1412,8 @@ pub mod statuses {
     pub const CANCELLED: u8 = super::CANCELLED;
     /// `usb_redir_inval`.
     pub const INVAL: u8 = super::INVAL;
+    /// `usb_redir_ioerror`.
+    pub const IOERROR: u8 = super::IOERROR;
     /// `usb_redir_stall`.
     pub const STALL: u8 = super::STALL;
     /// `usb_redir_babble`.
@@ -1454,12 +1608,96 @@ mod tests {
         let served_bus = Arc::clone(&served.bus);
         drop(served_bus);
         g.cancel(99).unwrap();
-        g.send(&Packet::new(START_ISO_STREAM, 6, vec![0x81, 1, 1])).unwrap();
-        let r = g.reply(ISO_STREAM_STATUS, 6).unwrap();
-        assert_eq!(r.payload, [STALL, 0x81]);
+        assert_eq!(g.start_iso(6, 0x81).unwrap(), INVAL, "not an isochronous endpoint");
         drop(g);
         let rec = served.end();
         assert_eq!(rec.lock().unwrap().violations.len(), 1, "the missing endpoint");
+    }
+
+    #[test]
+    fn isochronous_streams_run_at_the_endpoint_interval() {
+        use crate::descriptor::{self, DeviceDescriptor};
+        use crate::model::{Reply, Violations};
+        /// An isochronous IN on 0x83 that sends its interval's number,
+        /// nothing in every third; an isochronous OUT on 0x04.
+        struct Stream(Descriptors, u8, Arc<Mutex<Vec<Vec<u8>>>>);
+        impl DeviceModel for Stream {
+            fn name(&self) -> &'static str {
+                "stream"
+            }
+            fn descriptors(&self) -> &Descriptors {
+                &self.0
+            }
+            fn control(&mut self, _: Setup, _: &[u8], _: &mut Violations) -> Reply {
+                Reply::ack()
+            }
+            fn out(&mut self, _: u8, _: &[u8], _: &mut Violations) -> Reply {
+                Reply::ack()
+            }
+            fn in_transfer(&mut self, _: u8, _: usize, _: &mut Violations) -> Reply {
+                Reply::Nak
+            }
+            fn iso_in(&mut self, _: u8, _: usize, _: &mut Violations) -> Option<Vec<u8>> {
+                self.1 = self.1.wrapping_add(1);
+                (!self.1.is_multiple_of(3)).then(|| vec![self.1; 2])
+            }
+            fn iso_out(&mut self, _: u8, data: &[u8], _: &mut Violations) {
+                self.2.lock().unwrap().push(data.to_vec());
+            }
+            fn reset(&mut self) {}
+        }
+        let mut body = Vec::new();
+        body.extend_from_slice(&descriptor::interface(0, 0, 2, [0xff, 0, 0], 0));
+        body.extend_from_slice(&descriptor::endpoint(0x83, 1, 8, 1));
+        body.extend_from_slice(&descriptor::endpoint(0x04, 1, 8, 1));
+        let device = DeviceDescriptor {
+            usb: 0x0200,
+            class: [0, 0, 0],
+            max_packet0: 64,
+            vendor: 0x1234,
+            product: 0x5678,
+            device: 0x0100,
+            strings: [0, 0, 0],
+            configurations: 1,
+        };
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let descriptors = Descriptors {
+            speed: Speed::Full,
+            device: device.bytes(),
+            configs: vec![descriptor::configuration(1, 0, 0x80, 50, &body)],
+            strings: Vec::new(),
+        };
+        let served = serve(Box::new(Stream(descriptors, 0, Arc::clone(&got))));
+        let mut g = Guest::connect(&served.address, caps::QEMU).unwrap();
+        g.device().unwrap();
+        assert_eq!(g.set_configuration(1, 1).unwrap(), (SUCCESS, 1));
+        assert_eq!(g.unsolicited.iter().find(|p| p.kind == EP_INFO).unwrap().payload[16 + 3], 1);
+        assert_eq!(g.start_iso(2, 0x83).unwrap(), SUCCESS);
+        // One packet per millisecond, each with its own id from 0; the
+        // third interval's is an error, as the device sent nothing.
+        let mut packets = Vec::new();
+        while packets.len() < 6 {
+            let p = g.read().unwrap();
+            if p.kind == ISO_PACKET {
+                packets.push((p.id, p.payload[1], p.payload[4..].to_vec()));
+            }
+        }
+        assert_eq!(packets[0], (0, SUCCESS, vec![1, 1]));
+        assert_eq!(packets[1], (1, SUCCESS, vec![2, 2]));
+        assert_eq!(packets[2], (2, IOERROR, vec![]));
+        assert_eq!(packets[3], (3, SUCCESS, vec![4, 4]));
+        assert_eq!(g.stop_iso(3, 0x83).unwrap(), SUCCESS);
+        // OUT: packets as the guest sends them, nothing answered.
+        assert_eq!(g.start_iso(4, 0x04).unwrap(), SUCCESS);
+        g.iso_out(0, 0x04, &[7, 7]).unwrap();
+        g.iso_out(1, 0x04, &[8]).unwrap();
+        // A control transfer after them: they were taken in order.
+        let (status, _) = g.control(5, setup(0x80, 0, 0, 0, 2), &[]).unwrap();
+        assert_eq!(status, SUCCESS);
+        assert_eq!(*got.lock().unwrap(), [vec![7, 7], vec![8]]);
+        drop(g);
+        let rec = served.end();
+        assert_eq!(rec.lock().unwrap().violations, Vec::<String>::new());
     }
 
     #[test]

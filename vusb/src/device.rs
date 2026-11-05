@@ -7,7 +7,7 @@
 
 use crate::descriptor::{self, truncate};
 use crate::model::{
-    CONTROL, Descriptors, DeviceModel, Endpoint, RECIPIENT_DEVICE, RECIPIENT_ENDPOINT,
+    CONTROL, Descriptors, DeviceModel, Endpoint, ISOCHRONOUS, RECIPIENT_DEVICE, RECIPIENT_ENDPOINT,
     RECIPIENT_INTERFACE, Reply, STANDARD, Setup, Speed, StandardFault, Violations,
 };
 
@@ -297,6 +297,33 @@ impl Device {
             return None;
         };
         Some(ep)
+    }
+
+    /// The isochronous endpoint at `address`, or a violation.
+    fn check_isochronous(&self, address: u8, v: &mut Violations) -> Option<Endpoint> {
+        let ep = self.check_endpoint(address, v)?;
+        if ep.transfer_type() != ISOCHRONOUS {
+            v.report(format!("isochronous transfer on endpoint {address:#04x}, which is not one"));
+            return None;
+        }
+        Some(ep)
+    }
+
+    /// One isochronous IN packet from endpoint number `ep`, up to `max`
+    /// bytes: the data, or `None` when the device sends nothing.
+    pub fn iso_in(&mut self, ep: u8, max: usize, v: &mut Violations) -> Option<Vec<u8>> {
+        self.check_isochronous(0x80 | (ep & 0x0f), v)?;
+        self.model.iso_in(ep & 0x0f, max, v)
+    }
+
+    /// One isochronous OUT packet to endpoint number `ep`; whether the
+    /// device has such an endpoint to take it.
+    pub fn iso_out(&mut self, ep: u8, data: &[u8], v: &mut Violations) -> bool {
+        if self.check_isochronous(ep & 0x0f, v).is_none() {
+            return false;
+        }
+        self.model.iso_out(ep & 0x0f, data, v);
+        true
     }
 
     /// An IN transfer from endpoint number `ep`, up to `max` bytes.

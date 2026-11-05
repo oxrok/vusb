@@ -378,6 +378,28 @@ pub trait DeviceModel: Send {
         None
     }
 
+    /// One isochronous IN packet from endpoint number `ep`: what the
+    /// device sends in this service interval, up to `max` bytes, or
+    /// `None` when it sends nothing, which the host records as a missed
+    /// packet. Isochronous transfers have no handshake: no NAK, no
+    /// STALL and no retry, so the answer is the data or nothing. One
+    /// call is one interval of the endpoint, which is how a streaming
+    /// model keeps time: so many samples per call, never the clock. By
+    /// default the model has no such endpoint, and says so.
+    fn iso_in(&mut self, ep: u8, max: usize, v: &mut Violations) -> Option<Vec<u8>> {
+        let _ = max;
+        v.report(format!("isochronous IN on endpoint {ep}, which the model does not serve"));
+        None
+    }
+
+    /// One isochronous OUT packet to endpoint number `ep`: what the
+    /// host sent in this service interval. Nothing is answered. By
+    /// default the model has no such endpoint, and says so.
+    fn iso_out(&mut self, ep: u8, data: &[u8], v: &mut Violations) {
+        let _ = data;
+        v.report(format!("isochronous OUT to endpoint {ep}, which the model does not serve"));
+    }
+
     /// Whether the model wants to leave the bus and come back with
     /// what [`DeviceModel::descriptors`] says now, as an EZ-USB device
     /// does once its new firmware runs. Asked after every transfer; a

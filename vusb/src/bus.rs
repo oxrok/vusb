@@ -20,6 +20,9 @@
 //!   [`Status::Babble`].
 //! - An unlinked IN transfer that the device holds packets for
 //!   completes with them ([`crate::model::DeviceModel::in_unlinked`]).
+//! - An isochronous transfer is offered one packet per service
+//!   interval and completes at once, with a status per packet: it has
+//!   no handshake, so nothing is held.
 //! - An armed [`Arm`] is counted and fires once; an unplug drops the
 //!   held transfers and every one submitted until the next
 //!   [`Bus::reset`], as a device that is gone answers nothing.
@@ -58,7 +61,7 @@
 
 use crate::arm::{Arm, Event};
 use crate::device::Device;
-use crate::model::{BULK, CONTROL, DeviceModel, Endpoint, Reply, Setup, Violations};
+use crate::model::{BULK, CONTROL, DeviceModel, Endpoint, ISOCHRONOUS, Reply, Setup, Violations};
 use crate::observer::{Notice, Observer, Outcome, SharedObserver, Transfer};
 
 /// A transfer the host submits.
@@ -76,9 +79,10 @@ pub struct Urb {
     pub length: usize,
     /// The OUT payload; empty for an IN.
     pub data: Vec<u8>,
-    /// Isochronous packets, 0 for the other transfer types. Isochronous
-    /// transfers are not supported yet: one is a violation and a STALL.
-    pub iso_packets: u32,
+    /// The lengths of an isochronous transfer's packets, one per
+    /// service interval of the endpoint; empty for the other transfer
+    /// types. For an OUT, `data` is the packets one after the other.
+    pub iso: Vec<usize>,
 }
 
 impl Urb {
@@ -91,18 +95,47 @@ impl Urb {
             setup: Some(setup),
             length: usize::from(setup.length),
             data,
-            iso_packets: 0,
+            iso: Vec::new(),
         }
     }
 
     /// An IN transfer of up to `length` bytes from endpoint number `ep`.
     pub fn read(seqnum: u32, ep: u8, length: usize) -> Urb {
-        Urb { seqnum, ep, is_in: true, setup: None, length, data: Vec::new(), iso_packets: 0 }
+        Urb { seqnum, ep, is_in: true, setup: None, length, data: Vec::new(), iso: Vec::new() }
     }
 
     /// An OUT transfer of `data` to endpoint number `ep`.
     pub fn write(seqnum: u32, ep: u8, data: Vec<u8>) -> Urb {
-        Urb { seqnum, ep, is_in: false, setup: None, length: data.len(), data, iso_packets: 0 }
+        Urb { seqnum, ep, is_in: false, setup: None, length: data.len(), data, iso: Vec::new() }
+    }
+
+    /// An isochronous IN transfer from endpoint number `ep`: one packet
+    /// of up to each of `lengths`.
+    pub fn iso_read(seqnum: u32, ep: u8, lengths: Vec<usize>) -> Urb {
+        Urb {
+            seqnum,
+            ep,
+            is_in: true,
+            setup: None,
+            length: lengths.iter().sum(),
+            data: Vec::new(),
+            iso: lengths,
+        }
+    }
+
+    /// An isochronous OUT transfer to endpoint number `ep`: these
+    /// packets.
+    pub fn iso_write(seqnum: u32, ep: u8, packets: &[&[u8]]) -> Urb {
+        let data = packets.concat();
+        Urb {
+            seqnum,
+            ep,
+            is_in: false,
+            setup: None,
+            length: data.len(),
+            data,
+            iso: packets.iter().map(|p| p.len()).collect(),
+        }
     }
 
     /// The endpoint address with its direction bit; 0 for control.
@@ -141,6 +174,20 @@ pub enum Status {
     /// kind; the bytes the device held for it, if any, are in the
     /// completion (`-ECONNRESET`).
     Unlinked,
+    /// An isochronous packet the device did not send or take
+    /// (`-EXDEV`). Only a packet's status, never a transfer's.
+    Missed,
+}
+
+/// One packet of a completed isochronous transfer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IsoPacket {
+    /// Bytes moved: what the device sent, cut to the packet, or what it
+    /// took.
+    pub actual: usize,
+    /// [`Status::Ok`], [`Status::Babble`] when the device sent more than
+    /// the packet holds, or [`Status::Missed`].
+    pub status: Status,
 }
 
 /// A completed transfer.
@@ -153,8 +200,11 @@ pub struct Completion {
     /// Bytes transferred: the data of an IN, or how many of an OUT the
     /// device took.
     pub actual: usize,
-    /// The data of an IN, cut to the URB.
+    /// The data of an IN, cut to the URB. For an isochronous IN, the
+    /// packets' data one after the other, each as long as its `actual`.
     pub data: Vec<u8>,
+    /// The packets of an isochronous transfer; empty for the others.
+    pub iso: Vec<IsoPacket>,
 }
 
 impl Completion {
@@ -358,12 +408,14 @@ impl Bus {
             ));
             return step;
         }
-        if urb.ep != 0 && urb.is_in {
+        if urb.ep != 0 && urb.is_in && urb.iso.is_empty() {
             // The URB's own length, as the host submitted it (not rounded
             // to the packet size as for the model's in_transfer()).
             self.device.in_submitted(urb.ep, urb.length);
         }
-        let queued = urb.ep != 0 && self.held.iter().any(|u| u.key() == urb.key());
+        // An isochronous transfer never waits: it has no handshake.
+        let queued =
+            urb.ep != 0 && urb.iso.is_empty() && self.held.iter().any(|u| u.key() == urb.key());
         if queued {
             self.comment(&format!(
                 "seq {}: ep {:#04x} {} queued behind a held transfer",
@@ -424,6 +476,10 @@ impl Bus {
 
     /// Offers a transfer; whether the device answered NAK.
     fn offer(&mut self, urb: Urb, fresh: bool, step: &mut Step) -> bool {
+        if !urb.iso.is_empty() {
+            self.isochronous(&urb, step);
+            return false;
+        }
         let (reply, v) = self.perform(&urb);
         let nak = reply == Reply::Nak;
         let event = self.fired(&urb, &reply);
@@ -433,12 +489,74 @@ impl Bus {
         nak
     }
 
+    /// An isochronous transfer: each packet is offered once, in its
+    /// service interval, and the transfer completes at once whatever
+    /// the device did. There is no handshake to hold it by.
+    fn isochronous(&mut self, urb: &Urb, step: &mut Step) {
+        let mut v = Violations::default();
+        let mut packets = Vec::with_capacity(urb.iso.len());
+        let mut data = Vec::new();
+        let mut at = 0;
+        for &length in &urb.iso {
+            let packet = if urb.is_in {
+                match self.device.iso_in(urb.ep, length, &mut v) {
+                    Some(d) if d.len() > length => {
+                        data.extend_from_slice(&d[..length]);
+                        IsoPacket { actual: length, status: Status::Babble }
+                    }
+                    Some(d) => {
+                        data.extend_from_slice(&d);
+                        IsoPacket { actual: d.len(), status: Status::Ok }
+                    }
+                    None => IsoPacket { actual: 0, status: Status::Missed },
+                }
+            } else {
+                let chunk = urb.data.get(at..at + length).unwrap_or_default();
+                at += length;
+                if self.device.iso_out(urb.ep, chunk, &mut v) {
+                    IsoPacket { actual: chunk.len(), status: Status::Ok }
+                } else {
+                    IsoPacket { actual: 0, status: Status::Missed }
+                }
+            };
+            packets.push(packet);
+        }
+        let violations = v.drain();
+        self.observe(|o| {
+            for message in &violations {
+                o.violation(message);
+            }
+        });
+        let reply = Reply::Data(data.clone());
+        let transfer = Transfer {
+            seqnum: urb.seqnum,
+            endpoint: urb.address(),
+            kind: Some(ISOCHRONOUS),
+            setup: None,
+            is_in: urb.is_in,
+            requested: urb.length,
+            offered: urb.length,
+            data: urb.data.clone(),
+            reply: reply.clone(),
+            outcome: Outcome::Completed,
+            packets: packets.clone(),
+        };
+        self.observe(|o| o.transfer(&transfer));
+        let event = self.fired(urb, &reply);
+        let actual = packets.iter().map(|p| p.actual).sum();
+        step.completions.push(Completion {
+            seqnum: urb.seqnum,
+            status: Status::Ok,
+            actual,
+            data,
+            iso: packets,
+        });
+        self.check_renumeration(step);
+        self.event_fired(event, step);
+    }
+
     fn perform(&mut self, urb: &Urb) -> (Reply, Violations) {
         let mut v = Violations::default();
-        if urb.iso_packets > 0 {
-            v.report(format!("isochronous URB with {} packets; not supported", urb.iso_packets));
-            return (Reply::Stall, v);
-        }
         let reply = match urb.setup {
             Some(setup) => self.device.control(setup, &urb.data, &mut v),
             None if urb.is_in => {
@@ -505,6 +623,7 @@ impl Bus {
             data: Vec::new(),
             reply: Reply::Data(d.clone()),
             outcome: Outcome::Unlinked,
+            packets: Vec::new(),
         };
         self.observe(|o| o.transfer(&transfer));
         let d = &d[..d.len().min(urb.length)];
@@ -513,6 +632,7 @@ impl Bus {
             status: Status::Unlinked,
             actual: d.len(),
             data: d.to_vec(),
+            iso: Vec::new(),
         })
     }
 
@@ -554,6 +674,7 @@ impl Bus {
                 data: urb.data.clone(),
                 reply: reply.clone(),
                 outcome,
+                packets: Vec::new(),
             };
             self.observe(|o| o.transfer(&transfer));
         }
@@ -567,6 +688,7 @@ impl Bus {
                 status: Status::Stall,
                 actual: 0,
                 data: Vec::new(),
+                iso: Vec::new(),
             },
             Reply::Data(d) if outcome == Outcome::Babble => {
                 // More than the URB holds: the HCD ends it with -EOVERFLOW
@@ -577,6 +699,7 @@ impl Bus {
                     status: Status::Babble,
                     actual: d.len(),
                     data: d.to_vec(),
+                    iso: Vec::new(),
                 }
             }
             Reply::Data(d) if urb.is_in => {
@@ -588,6 +711,7 @@ impl Bus {
                     status: Status::Ok,
                     actual: d.len(),
                     data: d.to_vec(),
+                    iso: Vec::new(),
                 }
             }
             Reply::Data(d) => {
@@ -597,6 +721,7 @@ impl Bus {
                     status: Status::Ok,
                     actual: taken,
                     data: Vec::new(),
+                    iso: Vec::new(),
                 }
             }
         };
@@ -627,9 +752,13 @@ impl Bus {
         }
         match self.unlink(seqnum) {
             Unlink::Completed(c) => c,
-            Unlink::Cancelled | Unlink::NotHeld => {
-                Completion { seqnum, status: Status::Unlinked, actual: 0, data: Vec::new() }
-            }
+            Unlink::Cancelled | Unlink::NotHeld => Completion {
+                seqnum,
+                status: Status::Unlinked,
+                actual: 0,
+                data: Vec::new(),
+                iso: Vec::new(),
+            },
         }
     }
 
@@ -651,6 +780,20 @@ impl Bus {
     pub fn write(&mut self, ep: u8, data: &[u8]) -> Completion {
         let seqnum = self.next_seqnum();
         self.run(Urb::write(seqnum, ep, data.to_vec()))
+    }
+
+    /// An isochronous IN transfer from endpoint number `ep`: one packet
+    /// of up to each of `lengths`, one service interval each.
+    pub fn iso_read(&mut self, ep: u8, lengths: &[usize]) -> Completion {
+        let seqnum = self.next_seqnum();
+        self.run(Urb::iso_read(seqnum, ep, lengths.to_vec()))
+    }
+
+    /// An isochronous OUT transfer of these packets to endpoint number
+    /// `ep`.
+    pub fn iso_write(&mut self, ep: u8, packets: &[&[u8]]) -> Completion {
+        let seqnum = self.next_seqnum();
+        self.run(Urb::iso_write(seqnum, ep, packets))
     }
 }
 
@@ -848,15 +991,101 @@ mod tests {
         assert_eq!(rec.transfers[1].reply, Reply::Data(vec![0xa5; 6]), "the reply before the cut");
     }
 
+    /// A device with an isochronous IN on 0x83 that counts its service
+    /// intervals, silent in every fourth, and an isochronous OUT on 0x04
+    /// that keeps what it gets.
+    struct Stream {
+        descriptors: Descriptors,
+        interval: u8,
+        got: Vec<Vec<u8>>,
+    }
+
+    impl Stream {
+        fn new() -> Stream {
+            let mut body = Vec::new();
+            body.extend_from_slice(&descriptor::interface(0, 0, 3, [0xff, 0, 0], 0));
+            body.extend_from_slice(&descriptor::endpoint(0x82, 2, 64, 0));
+            body.extend_from_slice(&descriptor::endpoint(0x83, 1, 8, 1));
+            body.extend_from_slice(&descriptor::endpoint(0x04, 1, 8, 1));
+            let mut d = vendor_descriptors();
+            d.configs = vec![descriptor::configuration(1, 0, 0x80, 50, &body)];
+            Stream { descriptors: d, interval: 0, got: Vec::new() }
+        }
+    }
+
+    impl DeviceModel for Stream {
+        fn name(&self) -> &'static str {
+            "stream"
+        }
+        fn descriptors(&self) -> &Descriptors {
+            &self.descriptors
+        }
+        fn control(&mut self, _: Setup, _: &[u8], _: &mut Violations) -> Reply {
+            Reply::ack()
+        }
+        fn out(&mut self, _: u8, _: &[u8], _: &mut Violations) -> Reply {
+            Reply::ack()
+        }
+        fn in_transfer(&mut self, _: u8, _: usize, _: &mut Violations) -> Reply {
+            Reply::Nak
+        }
+        fn iso_in(&mut self, _: u8, max: usize, _: &mut Violations) -> Option<Vec<u8>> {
+            self.interval += 1;
+            // Nothing in every fourth interval; ten bytes in the sixth,
+            // more than a packet holds.
+            match self.interval {
+                n if n % 4 == 0 => None,
+                6 => Some(vec![6; 10]),
+                n => Some(vec![n; max.min(usize::from(n))]),
+            }
+        }
+        fn iso_out(&mut self, _: u8, data: &[u8], _: &mut Violations) {
+            self.got.push(data.to_vec());
+        }
+        fn reset(&mut self) {}
+    }
+
     #[test]
-    fn an_isochronous_urb_is_a_violation() {
-        let (mut bus, rec) = recorded(Device::new(Box::new(Holder(vendor_descriptors()))));
+    fn isochronous_transfers_complete_at_once_packet_by_packet() {
+        let (mut bus, rec) = recorded(Device::new(Box::new(Stream::new())));
         assert!(bus.control(setup(0x00, 9, 1, 0, 0), &[]).is_ok());
-        let urb = Urb { iso_packets: 2, ..Urb::read(9, 2, 128) };
-        let step = bus.submit(urb);
-        assert_eq!(step.completions.len(), 1);
-        assert_eq!(step.completions[0].status, Status::Stall);
-        assert_eq!(rec.lock().unwrap().violations.len(), 1);
+        // Six intervals: 1, 2 and 3 bytes, a missed one, 5 bytes, and a
+        // babble cut to the packet's 8.
+        let c = bus.iso_read(3, &[8; 6]);
+        assert_eq!((c.status, c.actual), (Status::Ok, 1 + 2 + 3 + 5 + 8));
+        let seen: Vec<(usize, Status)> = c.iso.iter().map(|p| (p.actual, p.status)).collect();
+        assert_eq!(
+            seen,
+            [
+                (1, Status::Ok),
+                (2, Status::Ok),
+                (3, Status::Ok),
+                (0, Status::Missed),
+                (5, Status::Ok),
+                (8, Status::Babble),
+            ]
+        );
+        assert_eq!(c.data, [1, 2, 2, 3, 3, 3, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6]);
+        assert_eq!(bus.held(), 0, "nothing is ever held");
+        // OUT: each packet reaches the device on its own.
+        let c = bus.iso_write(4, &[&[1, 2], &[], &[3]]);
+        assert_eq!((c.status, c.actual, c.iso.len()), (Status::Ok, 3, 3));
+        // A held bulk read on another endpoint does not hold it back.
+        assert_eq!(bus.submit(Urb::read(40, 2, 64)), Step::default());
+        assert_eq!(bus.iso_read(3, &[8]).iso[0], IsoPacket { actual: 7, status: Status::Ok });
+        // On an endpoint that is not isochronous, or that the model does
+        // not serve: missed, and flagged.
+        let c = bus.iso_read(2, &[8, 8]);
+        assert!(c.iso.iter().all(|p| p.status == Status::Missed));
+        let rec = rec.lock().unwrap();
+        assert_eq!(rec.violations.len(), 2, "{:?}", rec.violations);
+        let iso: Vec<&Transfer> = rec.transfers.iter().filter(|t| !t.packets.is_empty()).collect();
+        assert_eq!(iso.len(), 4);
+        assert_eq!(
+            iso[0].line(),
+            "isochronous 0x83 6 packets 48 -> 01020203030305050505050606060606060606, 1 missed, 1 babble"
+        );
+        assert_eq!(iso[1].line(), "isochronous 0x04 3 packets 3 010203 -> ok");
     }
 
     #[test]

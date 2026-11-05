@@ -44,6 +44,7 @@ use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex};
 
 use crate::arm::Event;
+use crate::bus::{IsoPacket, Status};
 use crate::model::{BULK, CONTROL, INTERRUPT, ISOCHRONOUS, Reply, Setup};
 
 /// One transfer the host submitted, as it was offered to the device,
@@ -76,6 +77,9 @@ pub struct Transfer {
     pub reply: Reply,
     /// How the URB ended, or that it has not.
     pub outcome: Outcome,
+    /// The packets of an isochronous transfer, each with what moved and
+    /// how it went; empty for the other transfer types.
+    pub packets: Vec<IsoPacket>,
 }
 
 /// Bytes as lowercase hex.
@@ -109,6 +113,12 @@ impl Transfer {
                 "control {:02x} {:02x} {:04x} {:04x} {:04x}",
                 u.request_type, u.request, u.value, u.index, u.length
             ),
+            None if !self.packets.is_empty() => format!(
+                "isochronous {:#04x} {} packets {}",
+                self.endpoint,
+                self.packets.len(),
+                self.requested
+            ),
             None => format!("{} {:#04x} {}", self.kind_name(), self.endpoint, self.offered),
         };
         if !self.data.is_empty() {
@@ -131,6 +141,13 @@ impl Transfer {
                     Outcome::Unlinked => s.push_str(" unlinked"),
                     _ => {}
                 }
+            }
+        }
+        let count = |status| self.packets.iter().filter(|p| p.status == status).count();
+        for (status, word) in [(Status::Missed, "missed"), (Status::Babble, "babble")] {
+            let n = count(status);
+            if n > 0 {
+                let _ = write!(s, ", {n} {word}");
             }
         }
         s
