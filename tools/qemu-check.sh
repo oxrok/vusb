@@ -55,7 +55,7 @@ trap finish EXIT
 
 dracut --no-hostonly --no-early-microcode --modules base \
     --add-drivers "xhci_pci xhci_hcd usbhid hid_generic cdc_acm ftdi_sio usbserial snd_usb_audio uvcvideo" \
-    --install "stty head cat sleep modprobe timeout wc mount mkdir basename printf od tr sed" \
+    --install "stty head cat sleep modprobe timeout wc mount mkdir basename printf od tr sed fold cut" \
     --install-optional "arecord v4l2-ctl" --include /usr/share/alsa /usr/share/alsa \
     --include "$here/tools/frames.sh" /vusb-frames \
     --include "$here/tools/qemu-guest-init.sh" /vusb-init \

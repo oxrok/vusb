@@ -34,7 +34,7 @@ echo "recorded $size bytes, starting $start"
 [ "$size" = 192000 ]
 [ "$start" = 00005b0890107e180020f626412dc632 ]
 # Every period is the same 96 bytes: the whole recording is the tone.
-periods=$(od -An -v -tx1 -w96 "$dir/rec.raw" | sort -u | wc -l)
+periods=$(od -An -v -tx1 "$dir/rec.raw" | tr -d ' \n' | fold -w 192 | sort -u | wc -l)
 echo "distinct periods: $periods"
 [ "$periods" = 1 ]
 violations=$($ctl status | sed -n 's/^violations=//p')

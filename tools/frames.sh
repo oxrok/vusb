@@ -39,7 +39,13 @@ size=$(wc -c <"$1")
 row=0
 frame=0
 strip=
-od -An -v -tx1 -w320 "$1" | tr -d ' ' | while read -r line; do
+# The capture in hex, a line of the picture on each line. od's own line
+# width is not used: some versions of od break a long line where they
+# read on.
+{
+    od -An -v -tx1 "$1" | tr -d ' \n' | fold -w 640
+    echo
+} | while read -r line; do
     if [ "$row" = 0 ]; then
         strip=$line
     elif [ "$row" -lt 8 ]; then
