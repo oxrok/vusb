@@ -76,10 +76,20 @@ jobs:
           else
             echo "::warning::no snd-usb-audio for kernel $(uname -r): the audio check did not run"
           fi
+      - if: steps.vhci.outputs.available == 'true'
+        name: Capture from the camera (isochronous, negotiated)
+        run: |
+          sudo apt-get install -y v4l-utils
+          if sudo modprobe uvcvideo; then
+            sudo -E sh tools/video-check.sh
+          else
+            echo "::warning::no uvcvideo for kernel $(uname -r): the video check did not run"
+          fi
 
   qemu:
-    # The device inside a guest: usbredir to QEMU's usb-redir device, the
-    # guest built from the runner's own kernel.
+    # The device inside a guest: usbredir to QEMU's usb-redir device. The
+    # guest runs the distribution's generic kernel, which has the sound and
+    # video drivers the runner's own lacks.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,8 +98,21 @@ jobs:
       - name: Install QEMU and dracut
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 dracut-core alsa-utils
-          sudo chmod a+r "/boot/vmlinuz-$(uname -r)"
+          sudo apt-get install -y qemu-system-x86 dracut-core alsa-utils v4l-utils
+          release=$(apt-cache depends linux-image-generic |
+            sed -n 's/.*Depends: linux-image-\(.*-generic\)$/\1/p' | head -1)
+          if [ -n "$release" ] && sudo apt-get install -y --no-install-recommends \
+              "linux-image-$release"; then
+            extra="linux-modules-extra-$release"
+            if apt-cache show "$extra" >/dev/null 2>&1; then
+              sudo apt-get install -y --no-install-recommends "$extra"
+            fi
+          else
+            echo "::warning::no generic kernel to install: the guest runs $(uname -r)"
+            release=$(uname -r)
+          fi
+          echo "VUSB_GUEST_KERNEL=$release" >>"$GITHUB_ENV"
+          sudo chmod a+r "/boot/vmlinuz-$release"
           if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
           qemu-system-x86_64 -device help | grep usb-redir
       - run: cargo build --workspace
@@ -98,10 +121,17 @@ jobs:
       - run: sh tools/qemu-check.sh hid-relay
       - name: The microphone, an isochronous stream
         run: |
-          if modinfo snd-usb-audio >/dev/null 2>&1; then
+          if modinfo -k "$VUSB_GUEST_KERNEL" snd-usb-audio >/dev/null 2>&1; then
             sh tools/qemu-check.sh uac-mic
           else
-            echo "::warning::no snd-usb-audio for kernel $(uname -r): the guest cannot record"
+            echo "::warning::no snd-usb-audio for kernel $VUSB_GUEST_KERNEL: the guest cannot record"
+          fi
+      - name: The camera, a stream the guest negotiates
+        run: |
+          if modinfo -k "$VUSB_GUEST_KERNEL" uvcvideo >/dev/null 2>&1; then
+            sh tools/qemu-check.sh uvc-cam
+          else
+            echo "::warning::no uvcvideo for kernel $VUSB_GUEST_KERNEL: the guest cannot capture"
           fi
       - if: failure()
         name: What the guest and QEMU said

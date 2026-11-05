@@ -7,17 +7,22 @@
 #
 # With uac-mic the guest also records a second of audio, which needs
 # arecord and the alsa configuration on this machine, and snd-usb-audio
-# in its kernel.
+# in its kernel. With uvc-cam it captures ten frames, which needs
+# v4l2-ctl on this machine and uvcvideo in its kernel.
 #
-# Needs qemu-system-x86_64 with the usb-redir device, dracut, and this
-# machine's kernel readable in /boot. Without KVM the guest is emulated
+# The guest runs this machine's kernel, or the installed one whose
+# release VUSB_GUEST_KERNEL names.
+#
+# Needs qemu-system-x86_64 with the usb-redir device, dracut, and that
+# kernel readable in /boot. Without KVM the guest is emulated
 # and takes a minute or two to boot.
 set -eu
 example=${1:-cdc-echo}
 here=$(cd "$(dirname "$0")/.." && pwd)
 vusb=$here/target/debug/vusb
 ctl=$here/target/debug/vusb-ctl
-kernel=/boot/vmlinuz-$(uname -r)
+release=${VUSB_GUEST_KERNEL:-$(uname -r)}
+kernel=/boot/vmlinuz-$release
 dir=$(mktemp -d /tmp/vusb-qemu.XXXXXX)
 console=$dir/console.log
 ctl() { "$ctl" -s "$dir/c.sock" "$@"; }
@@ -49,11 +54,12 @@ finish() {
 trap finish EXIT
 
 dracut --no-hostonly --no-early-microcode --modules base \
-    --add-drivers "xhci_pci xhci_hcd usbhid hid_generic cdc_acm ftdi_sio usbserial snd_usb_audio" \
-    --install "stty head cat sleep modprobe timeout wc mount mkdir basename printf od tr" \
-    --install-optional "arecord" --include /usr/share/alsa /usr/share/alsa \
+    --add-drivers "xhci_pci xhci_hcd usbhid hid_generic cdc_acm ftdi_sio usbserial snd_usb_audio uvcvideo" \
+    --install "stty head cat sleep modprobe timeout wc mount mkdir basename printf od tr sed" \
+    --install-optional "arecord v4l2-ctl" --include /usr/share/alsa /usr/share/alsa \
+    --include "$here/tools/frames.sh" /vusb-frames \
     --include "$here/tools/qemu-guest-init.sh" /vusb-init \
-    --force "$dir/initrd.img" "$(uname -r)" >"$dir/dracut.log" 2>&1
+    --force "$dir/initrd.img" "$release" >"$dir/dracut.log" 2>&1
 
 "$vusb" run "$example" --usbredir "$dir/r.sock" --control "$dir/c.sock" \
     --log "$dir/tx.log" </dev/null 2>"$dir/vusb.err" &
@@ -98,6 +104,28 @@ if [ "$example" = uac-mic ]; then
         grep '^VUSB-GUEST: audio' "$console" || true
         exit 1
     }
+fi
+
+# The camera: ten frames each time, every one the pattern byte for byte
+# (the guest checks that, and prints their numbers), in rising order.
+# The guest may lose a frame, so the numbers need not be consecutive.
+if [ "$example" = uvc-cam ]; then
+    # The console's lines end in a carriage return.
+    grep '^VUSB-GUEST: video' "$console" | tr -d '\r' >"$dir/captures" || true
+    [ "$(wc -l <"$dir/captures")" -ge 2 ] || { echo "the guest did not capture twice"; exit 1; }
+    while read -r _ _ numbers; do
+        count=0
+        last=-1
+        for n in $numbers; do
+            case $n in
+                *[!0-9]*) echo "not the pattern: $numbers"; exit 1 ;;
+            esac
+            [ "$n" -gt "$last" ] || { echo "frame $n after frame $last"; exit 1; }
+            last=$n
+            count=$((count + 1))
+        done
+        [ "$count" = 10 ] || { echo "$count frames, not ten: $numbers"; exit 1; }
+    done <"$dir/captures"
 fi
 
 violations=$(ctl status | sed -n 's/^violations=//p')
