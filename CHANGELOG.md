@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-11-05)
 
 - A second transaction log format, `fixture`, beside the default: the
   compact lines of recorded USB fixtures (`ctl_in 21 01 0300 0000 8 ->
