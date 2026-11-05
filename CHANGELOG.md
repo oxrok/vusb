@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- A gadget, a third transport: `transport::gadget::Server` puts the device
+  on a USB device controller of the machine through Linux's Raw Gadget
+  driver (`/dev/raw-gadget`), so it is on a real cable, for any host. Every
+  control request reaches the model, enumeration included. The server
+  stands in for the host: it asks the model for IN transfers ahead, takes
+  OUT packet by packet, and makes a STALL a halt. An unplug pulls the
+  connection down through the controller's `soft_connect`; a replug and a
+  renumeration bind the controller anew. `Builder::gadget` and
+  `vusb run --gadget UDC` (`auto` for the only controller) serve a session
+  so, and `status` says `transport=gadget`, the `udc` and whether a `host`
+  configured the device; `ready` and `gone` follow the host.
+  `dummy_hcd` is a controller in software, for a machine with none.
+  Isochronous endpoints are served but not tried on hardware. The new
+  `gadget` feature is off by default in the library and on in `vusb-cli`:
+  it brings the `libc` crate on Linux and the crate's only unsafe code, the
+  driver's ioctls; without it the crate still forbids unsafe code.
+  `docs/gadget.md` has what to know, and `tools/gadget-check.sh` checks it
+  on `dummy_hcd`.
+- Mass storage: `shells::msc` is a disk, the Bulk-Only Transport and the
+  SCSI commands of a disk driver around a `Medium` of blocks. `Memory` is
+  a disk in memory and `Image` a disk that is a file, made beforehand: its
+  size is the disk's and what the host writes is in it. The data phase is
+  always as long as the host said, filled when a command has less, so a
+  host sees the same over every transport. Faults: `read-error=LBA`,
+  `write-error=LBA`, `not-ready=N`. The `msc-disk` example takes
+  `file=PATH`, or `size=MIB` of memory, `read-only=1` and `removable=1`;
+  `vusb run` takes `file=` from its command line only, never from the
+  control socket.
 - Isochronous streams in real time, when the device asks:
   `DeviceModel::realtime`, `false` by default. The model still reads no
   clock and sends the same packets; the bus gives every service interval

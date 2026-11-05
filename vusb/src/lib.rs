@@ -114,7 +114,8 @@
 //!
 //! Most devices start from a shell and implement its smaller trait:
 //! [`shells::cdc::Serial`] for a serial port, [`shells::hid::HidReports`]
-//! for a HID device, [`shells::ftdi::FtdiPorts`] for an FTDI chip. A
+//! for a HID device, [`shells::ftdi::FtdiPorts`] for an FTDI chip,
+//! [`shells::msc::Medium`] for a disk, in memory or in a file. A
 //! device that fits no shell implements [`model::DeviceModel`] itself;
 //! its documentation has a complete bare vendor device. Descriptors are
 //! built with [`descriptor`].
@@ -155,14 +156,21 @@
 //! feature (on by default) holds the server and the attach path, and
 //! `control` (on by default, needs `usbip`) the session and its socket;
 //! neither is needed to write and unit test a model. `fixture` (on by
-//! default) is the second log format, and brings the `sha2` crate. Hubs and super
-//! speed are not supported yet.
+//! default) is the second log format, and brings the `sha2` crate.
+//! `gadget` (off by default) is the transport to a USB device
+//! controller, [`transport::gadget`]: Linux only, it brings the `libc`
+//! crate and the crate's only unsafe code, the ioctls of the kernel's
+//! Raw Gadget driver; without it the crate forbids unsafe code. Hubs
+//! and super speed are not supported yet.
 //!
 //! The command line tools, `vusb` and `vusb-ctl`, are the `vusb-cli`
 //! crate; the control protocol is documented in the repository's
 //! `docs/control.md`.
 
-#![forbid(unsafe_code)]
+// The gadget transport calls the ioctls of a kernel driver; nothing
+// else may be unsafe, and without the feature nothing is.
+#![cfg_attr(not(feature = "gadget"), forbid(unsafe_code))]
+#![cfg_attr(feature = "gadget", deny(unsafe_code))]
 
 pub mod arm;
 pub mod bus;
@@ -181,7 +189,7 @@ pub mod attach;
 pub mod control;
 #[cfg(feature = "control")]
 pub mod session;
-#[cfg(any(feature = "usbip", feature = "usbredir"))]
+#[cfg(any(feature = "usbip", feature = "usbredir", feature = "gadget"))]
 pub mod transport;
 
 use std::fmt;

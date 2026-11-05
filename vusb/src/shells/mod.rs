@@ -15,8 +15,13 @@
 //! - [`ezusb`]: the Cypress FX2 without firmware, its boot loader
 //!   (request `0xa0`, the 8051 reset in `CPUCS`) and a record of the
 //!   upload; the model renumerates as the firmware's device.
+//! - [`msc`]: a mass storage disk: the Bulk-Only Transport and the SCSI
+//!   commands of a disk driver, with a model that is blocks
+//!   ([`msc::Medium`]), in memory or in a file, reached through
+//!   `/dev/sdX` on Linux.
 
 pub mod cdc;
 pub mod ezusb;
 pub mod ftdi;
 pub mod hid;
+pub mod msc;

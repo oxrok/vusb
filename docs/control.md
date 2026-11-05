@@ -48,8 +48,8 @@ command never overlaps a re-attach.
 | `sync` | | answers after every input taken before it, a renumeration included |
 | `quit` | | detaches the device and ends the session |
 
-The `events` topic carries `ready`, `renumerated`, `replugged`, `unplugged`, `fired`,
-`renumeration` and `section`.
+The `events` topic carries `ready`, `gone`, `renumerated`, `replugged`, `unplugged`,
+`fired`, `renumeration` and `section`.
 
 ## The log
 
@@ -99,3 +99,6 @@ on loopback included, so an address that is not loopback is refused without
 
 A client can detach the device and make it misbehave. It cannot write files where
 it likes: `log` only creates new files, in the directory given with `--log-dir`.
+Nor can it make `vusb run` open one: a model option that names a file, the
+`file=` of `msc-disk`, is taken from the command line only. A program of your
+own that builds models from `options` decides that for itself.

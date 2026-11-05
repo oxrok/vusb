@@ -11,6 +11,7 @@
 //! sudo vusb run hid-relay --attach --open-devices --control /tmp/relay.sock
 //! vusb-ctl -s /tmp/relay.sock status
 //! sudo vusb cleanup
+//! sudo vusb run msc-disk -o file=disk.img --gadget auto
 //! ```
 //!
 //! The exit status of `run` is 0, 2 when the host left the protocol, and
@@ -61,13 +62,19 @@ struct Run {
     #[arg(long, default_value = "127.0.0.1:3240")]
     listen: String,
     /// Attaches the device through vhci-hcd (Linux, root).
-    #[arg(long, conflicts_with = "usbredir")]
+    #[arg(long, conflicts_with_all = ["usbredir", "gadget"])]
     attach: bool,
     /// Serves the device over usbredir instead, for QEMU's usb-redir
     /// device: a socket path or host:port that QEMU connects to with
     /// `-chardev socket,id=u,path=PATH -device usb-redir,chardev=u`.
-    #[arg(long, value_name = "ADDRESS")]
+    #[arg(long, value_name = "ADDRESS", conflicts_with = "gadget")]
     usbredir: Option<String>,
+    /// Puts the device on a USB device controller of this machine
+    /// instead, for the host at the other end of its cable: a name in
+    /// /sys/class/udc, or `auto` for the only one (Linux, root, and
+    /// `modprobe raw_gadget`).
+    #[arg(long, value_name = "UDC")]
+    gadget: Option<String>,
     /// After attaching, makes the device nodes world accessible.
     #[arg(long)]
     open_devices: bool,
@@ -152,10 +159,37 @@ fn announce(event: &Value) {
     eprintln!("{name}{fields}");
 }
 
+/// The key of a model option that names a file.
+const FILE: &str = "file";
+
+/// The options a model is built from, when `asked` come from the
+/// control socket and `started` from the command line. An option that
+/// names a file is the command line's alone: this program opens it,
+/// often as root, and whoever reaches the socket need not be allowed
+/// to. So the files of the start stay, and no other is taken.
+fn pinned(
+    started: &[(String, String)],
+    asked: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
+    let is_file = |(key, _): &&(String, String)| key == FILE;
+    if let Some((_, path)) = asked.iter().filter(is_file).find(|o| !started.contains(o)) {
+        return Err(vusb::Error::Invalid(format!(
+            "{FILE}={path}: a file is named on the command line of vusb run, not afterwards"
+        )));
+    }
+    let mut options: Vec<_> = asked.iter().filter(|o| !is_file(o)).cloned().collect();
+    options.extend(started.iter().filter(is_file).cloned());
+    Ok(options)
+}
+
 fn serve(args: Run) -> Result<u8> {
     let example = args.example.clone();
-    let mut builder = Builder::new(Box::new(move |o| examples::build(&example, o)))
-        .options(options::parse(&args.options)?)
+    let started = options::parse(&args.options)?;
+    let pins = started.clone();
+    let factory =
+        move |asked: &[(String, String)]| examples::build(&example, &pinned(&pins, asked)?);
+    let mut builder = Builder::new(Box::new(factory))
+        .options(started)
         .listen(&args.listen)
         .attach(args.attach)
         .open_devices(args.open_devices)
@@ -169,12 +203,18 @@ fn serve(args: Run) -> Result<u8> {
     if let Some(usbredir) = &args.usbredir {
         builder = builder.usbredir(Address::parse(usbredir));
     }
+    if let Some(udc) = &args.gadget {
+        builder = builder.gadget(udc);
+    }
     if let Some(control) = &args.control {
         let owner = args.control_owner.as_deref().map(parse_owner).transpose()?;
         let options = ListenOptions { owner, allow_remote: args.control_allow_remote };
         builder = builder.control_with(Address::parse(control), options);
     }
     let session = builder.start()?;
+    if let Some(udc) = session.gadget() {
+        eprintln!("gadget on {udc}");
+    }
     if let Some(addr) = session.addr() {
         eprintln!("listening on {addr} busid 1-1");
     }
@@ -200,4 +240,32 @@ fn serve(args: Run) -> Result<u8> {
     let report = session.run()?;
     eprintln!("violations: {}", report.violations);
     Ok(if report.violations == 0 { 0 } else { 2 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+    }
+
+    #[test]
+    fn a_file_is_named_at_the_start_only() {
+        let started = options(&[("file", "disk.img"), ("read-only", "1")]);
+        // The start itself, and options that leave the file alone.
+        assert_eq!(pinned(&started, &started).unwrap().len(), 2);
+        assert_eq!(
+            pinned(&started, &options(&[("not-ready", "3")])).unwrap(),
+            options(&[("not-ready", "3"), ("file", "disk.img")])
+        );
+        assert_eq!(
+            pinned(&started, &options(&[("file", "disk.img")])).unwrap(),
+            options(&[("file", "disk.img")])
+        );
+        // Another file, or one where there was none.
+        assert!(pinned(&started, &options(&[("file", "/etc/shadow")])).is_err());
+        assert!(pinned(&[], &options(&[("file", "disk.img")])).is_err());
+        assert_eq!(pinned(&[], &options(&[("size", "2")])).unwrap(), options(&[("size", "2")]));
+    }
 }

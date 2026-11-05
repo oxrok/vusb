@@ -18,15 +18,22 @@ vusb list                       # the example devices
 sudo modprobe vhci-hcd
 sudo vusb run hid-relay --attach --open-devices --control /tmp/relay.sock
 sudo vusb run uac-mic -o realtime=1 --attach    # a microphone, in real time
+sudo vusb run msc-disk -o file=disk.img --attach    # a disk that is a file
 sudo vusb cleanup               # the ports a killed run left attached
 ```
+
+`--usbredir ADDRESS` serves the device to a QEMU guest instead, and
+`--gadget UDC` puts it on a USB device controller of the machine, on a cable
+to any host (`auto` for the only controller; Linux's `raw_gadget` module and
+root).
 
 `--log FILE` keeps a transaction log, and `--log-format fixture` writes it in
 the format made for golden files, with `--log-digest-above N` for long data.
 
 `vusb run` exits with status 0, 2 when the host left the USB protocol or the
 device's own, and 1 on an error. The examples are a HID relay board, a CDC-ACM
-serial port that echoes, an FTDI chip looped back, a USB Audio
+serial port that echoes, an FTDI chip looped back, a mass storage disk in a
+file or in memory, a USB Audio
 microphone that hears a tone, and a USB Video camera that sees a test
 pattern; a product's own devices
 run from its own program, on the library's `Session`.

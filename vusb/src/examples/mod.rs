@@ -7,6 +7,7 @@
 //! - [`relay`]: a USB relay board, one HID feature report.
 //! - [`cdc_echo`]: a CDC-ACM serial port that sends back what it gets.
 //! - [`ftdi_loopback`]: an FTDI chip with its pins looped back.
+//! - [`msc_disk`]: a mass storage disk, in a file or in memory.
 //! - [`uac_mic`]: a USB Audio microphone that hears a tone, on an
 //!   isochronous endpoint.
 //! - [`uvc_cam`]: a USB Video camera that sees a test pattern, a stream
@@ -14,6 +15,7 @@
 
 pub mod cdc_echo;
 pub mod ftdi_loopback;
+pub mod msc_disk;
 pub mod relay;
 pub mod uac_mic;
 pub mod uvc_cam;
@@ -26,6 +28,7 @@ pub const NAMES: &[(&str, &str)] = &[
     (cdc_echo::NAME, cdc_echo::ABOUT),
     (ftdi_loopback::NAME, ftdi_loopback::ABOUT),
     (relay::NAME, relay::ABOUT),
+    (msc_disk::NAME, msc_disk::ABOUT),
     (uac_mic::NAME, uac_mic::ABOUT),
     (uvc_cam::NAME, uvc_cam::ABOUT),
 ];
@@ -40,6 +43,7 @@ pub fn build(name: &str, options: &[(String, String)]) -> Result<Box<dyn DeviceM
         cdc_echo::NAME => cdc_echo::build(options),
         ftdi_loopback::NAME => ftdi_loopback::build(options),
         relay::NAME => relay::build(options),
+        msc_disk::NAME => msc_disk::build(options),
         uac_mic::NAME => uac_mic::build(options),
         uvc_cam::NAME => uvc_cam::build(options),
         other => Err(Error::Invalid(format!("no example named {other}"))),

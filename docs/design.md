@@ -10,14 +10,17 @@ layers. You write the yellow box. vusb is everything inside the dashed line.
 - **Bus** is the host controller. Tests and transports all drive it.
 - **Device** answers the standard requests every USB device must, and checks what
   the host does.
-- **Shells** carry what every device of a kind shares: HID, CDC-ACM, FTDI, EZ-USB.
+- **Shells** carry what every device of a kind shares: HID, CDC-ACM, FTDI, EZ-USB,
+  mass storage.
 - **Your model** says what the device means. It implements `DeviceModel`, or a
   shell's smaller trait.
 - **Observers** see every transfer, to keep a log, count violations or stream live.
 - **Transports** carry the bus to a host: USB/IP to Linux's `vhci-hcd`, so the
   device is on the machine, or usbredir to
   [QEMU](https://github.com/oxrok/vusb/blob/main/docs/qemu.md), so it is inside
-  a guest. Both are codecs around the same `Bus`.
+  a guest, or Linux's Raw Gadget driver to a
+  [device controller](https://github.com/oxrok/vusb/blob/main/docs/gadget.md),
+  so it is on a cable. All are codecs around the same `Bus`.
 - **Session** serves a model and attaches it, and takes commands through the
   [control protocol](https://github.com/oxrok/vusb/blob/main/docs/control.md).
 
@@ -32,7 +35,9 @@ host controller does.
 Four design choices follow from that:
 
 - **Models have no I/O, threads or clocks.** They are plain state machines, so
-  they are easy to write and run the same everywhere. A model that needs time
+  they are easy to write and run the same everywhere. A disk's blocks are the
+  one thing a model may keep outside itself, in a file, behind the mass
+  storage shell's `Medium`: a read or a write there is done when it returns. A model that needs time
   counts the host's offers, so a run does not depend on how fast the machine is.
   A stream that has to move at its real rate says so (`DeviceModel::realtime`),
   and the bus does the waiting: the model sends the same packets either way.

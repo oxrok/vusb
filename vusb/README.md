@@ -100,6 +100,21 @@ Without a shell, a model implements `DeviceModel` directly. The
 [`examples`](https://github.com/oxrok/vusb/tree/main/vusb/src/examples) module
 has a short model on each kind of shell, and a microphone and a camera
 that stream: as fast as the host asks, or in real time with `-o realtime=1`.
+
+## A disk from a file
+
+The mass storage shell is a disk made of whatever holds blocks. The `msc-disk`
+example takes a file made beforehand, and that file is the drive:
+
+```sh
+truncate -s 64M disk.img
+sudo vusb run msc-disk -o file=disk.img --attach
+```
+
+The machine gets a `/dev/sdX` to partition, format and mount, and what it
+writes is in the file. Without `file=` the disk is memory, empty at every
+start. Bad blocks and a disk that is slow to spin up are options:
+`-o read-error=LBA`, `-o write-error=LBA`, `-o not-ready=N`.
 The API is documented on
 [docs.rs](https://docs.rs/vusb).
 
@@ -126,6 +141,9 @@ See the [control protocol](https://github.com/oxrok/vusb/blob/main/docs/control.
   guest takes one on any platform, with no root: see
   [QEMU](https://github.com/oxrok/vusb/blob/main/docs/qemu.md). Models and
   tests run on Linux, macOS and Windows.
+- A device on a real cable, for any host, needs a board with a USB device
+  port, Linux's `raw_gadget` module and root: see
+  [gadget](https://github.com/oxrok/vusb/blob/main/docs/gadget.md).
 - No hubs or super speed yet.
 - The API may change before 1.0.
 

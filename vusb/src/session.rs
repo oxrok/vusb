@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! A session: a model served over USB/IP, attached when asked to, and
-//! driven through control connections while it runs.
+//! driven through control connections while it runs. Or served over
+//! usbredir to a QEMU guest, or through a gadget to the host at the end
+//! of a cable ([`Builder::usbredir`], `Builder::gadget`).
 //!
 //! ```no_run
 //! use vusb::control::Address;
@@ -51,6 +53,8 @@ use crate::device::Device;
 use crate::model::{DeviceModel, Reply, Speed};
 use crate::observer::fixture::{self, Rules};
 use crate::observer::{Notice, Observer, SharedObserver, Transfer, hex};
+#[cfg(feature = "gadget")]
+use crate::transport::gadget;
 use crate::transport::usbip::Server;
 use crate::transport::usbredir;
 use crate::{Error, Result};
@@ -143,6 +147,8 @@ pub struct Builder {
     verbose: bool,
     control: Vec<(Address, ListenOptions)>,
     usbredir: Option<(Address, ListenOptions)>,
+    #[cfg(feature = "gadget")]
+    gadget: Option<String>,
     stdio: bool,
     watcher: Option<Watcher>,
     observers: Vec<SharedObserver>,
@@ -168,6 +174,8 @@ impl Builder {
             verbose: false,
             control: Vec::new(),
             usbredir: None,
+            #[cfg(feature = "gadget")]
+            gadget: None,
             stdio: false,
             watcher: None,
             observers: Vec::new(),
@@ -285,6 +293,20 @@ impl Builder {
         self
     }
 
+    /// Serves the device through a gadget on the USB device controller
+    /// `udc` instead of USB/IP: a name in `/sys/class/udc`, or `auto`
+    /// for the only one. The device is then on that controller's bus,
+    /// for the host at the other end of the cable, and `ready` means a
+    /// host configured it. Linux, root and the `raw_gadget` module; see
+    /// [`gadget`]. Not with [`Builder::attach`] or
+    /// [`Builder::usbredir`].
+    #[cfg(feature = "gadget")]
+    #[must_use]
+    pub fn gadget(mut self, udc: &str) -> Builder {
+        self.gadget = Some(udc.to_owned());
+        self
+    }
+
     /// Standard input and output are a control connection, subscribed
     /// to the lifecycle events; the end of input ends the session.
     #[must_use]
@@ -325,8 +347,8 @@ impl Builder {
         self
     }
 
-    /// Starts the transport's server on its own thread: usbredir when
-    /// asked for, USB/IP otherwise.
+    /// Starts the transport's server on its own thread: usbredir or a
+    /// gadget when asked for, USB/IP otherwise.
     fn transport(
         &self,
         bus: &Arc<Mutex<Bus>>,
@@ -348,19 +370,43 @@ impl Builder {
             let _ = signal_tx.send(Input::Signal(signal, section));
         };
         let shared_stop = Arc::clone(stop);
+        #[cfg(feature = "gadget")]
+        if let Some(name) = &self.gadget {
+            if self.attach || self.usbredir.is_some() {
+                return Err(Error::Invalid(
+                    "a device is on a controller, attached here or served to QEMU: one of them"
+                        .into(),
+                ));
+            }
+            let udc = gadget::Udc::find(name)?;
+            let link_tx = tx.clone();
+            let server = gadget::Server::open(Arc::clone(bus), &udc)?.on_signal(on_signal).on_link(
+                move |link| {
+                    let _ = link_tx.send(Input::Link(link == gadget::Link::Configured));
+                },
+            );
+            return Ok(Transport {
+                addr: None,
+                devid: 0,
+                attachment: None,
+                redir_address: None,
+                remote: Some(Remote::Gadget(server.handle(), udc.device)),
+                thread: thread::spawn(move || server.run(&shared_stop)),
+            });
+        }
         if let Some((address, options)) = &self.usbredir {
             let link_tx = tx.clone();
             let server = usbredir::Server::bind(Arc::clone(bus), address, options)?
                 .on_signal(on_signal)
                 .on_link(move |link| {
-                    let _ = link_tx.send(Input::Link(link));
+                    let _ = link_tx.send(Input::Link(link == usbredir::Link::Connected));
                 });
             return Ok(Transport {
                 addr: None,
                 devid: 0,
                 attachment: None,
                 redir_address: Some(server.address()?),
-                redir: Some(server.handle()),
+                remote: Some(Remote::Redir(server.handle())),
                 thread: thread::spawn(move || server.run(&shared_stop)),
             });
         }
@@ -376,7 +422,7 @@ impl Builder {
             attachment: self
                 .attach
                 .then(|| Attachment::new(bound, &self.busid, devid, self.open_devices)),
-            redir: None,
+            remote: None,
             redir_address: None,
             thread: thread::spawn(move || server.run(&listener, &shared_stop)),
         })
@@ -414,7 +460,7 @@ impl Builder {
 
         let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
-        let Transport { thread: server_thread, addr, devid, attachment, redir, redir_address } =
+        let Transport { thread: server_thread, addr, devid, attachment, remote, redir_address } =
             self.transport(&bus, &hub, &tx, &stop)?;
         let guard = attachment.as_ref().map(Attachment::guard);
 
@@ -440,7 +486,7 @@ impl Builder {
             initial_options: self.options.clone(),
             options: self.options,
             attachment,
-            redir,
+            remote,
             guest: false,
             placed: None,
             unplugged: false,
@@ -487,8 +533,57 @@ struct Transport {
     addr: Option<std::net::SocketAddr>,
     devid: u32,
     attachment: Option<Attachment>,
-    redir: Option<usbredir::Handle>,
+    remote: Option<Remote>,
     redir_address: Option<Address>,
+}
+
+/// A transport that puts the device somewhere itself, and is told when
+/// it is to leave and to come back: usbredir with its guest, a gadget
+/// with the host on its controller.
+#[derive(Clone, Debug)]
+enum Remote {
+    Redir(usbredir::Handle),
+    /// With the controller's name.
+    #[cfg(feature = "gadget")]
+    Gadget(gadget::Handle, String),
+}
+
+impl Remote {
+    /// The device comes (back); the server resets the bus.
+    fn connect(&self) {
+        match self {
+            Remote::Redir(handle) => handle.connect(),
+            #[cfg(feature = "gadget")]
+            Remote::Gadget(handle, _) => handle.connect(),
+        }
+    }
+
+    /// The device leaves.
+    fn disconnect(&self) {
+        match self {
+            Remote::Redir(handle) => handle.disconnect(),
+            #[cfg(feature = "gadget")]
+            Remote::Gadget(handle, _) => handle.disconnect(),
+        }
+    }
+
+    /// The transport's name, as `status` says it.
+    fn name(&self) -> &'static str {
+        match self {
+            Remote::Redir(_) => "usbredir",
+            #[cfg(feature = "gadget")]
+            Remote::Gadget(..) => "gadget",
+        }
+    }
+
+    /// The controller of a gadget.
+    fn udc(&self) -> Option<&str> {
+        match self {
+            Remote::Redir(_) => None,
+            #[cfg(feature = "gadget")]
+            Remote::Gadget(_, udc) => Some(udc),
+        }
+    }
 }
 
 /// Stops a session from anywhere, a signal handler included.
@@ -523,11 +618,23 @@ pub struct Report {
 }
 
 enum Input {
-    Connected { conn: u64, tx: SyncSender<String>, writer: JoinHandle<()>, subscribed: bool },
-    Line { conn: u64, line: String },
-    Closed { conn: u64, ends_session: bool },
+    Connected {
+        conn: u64,
+        tx: SyncSender<String>,
+        writer: JoinHandle<()>,
+        subscribed: bool,
+    },
+    Line {
+        conn: u64,
+        line: String,
+    },
+    Closed {
+        conn: u64,
+        ends_session: bool,
+    },
     Signal(Signal, String),
-    Link(usbredir::Link),
+    /// A guest or a host took the device, or let go of it.
+    Link(bool),
 }
 
 fn accept_loop(listener: &Listener, tx: &mpsc::Sender<Input>, stop: &AtomicBool, ids: &AtomicU64) {
@@ -762,9 +869,10 @@ pub struct Ctx {
     initial_options: Vec<(String, String)>,
     options: Vec<(String, String)>,
     attachment: Option<Attachment>,
-    /// The usbredir server, when that is the transport.
-    redir: Option<usbredir::Handle>,
-    /// A usbredir guest has the device.
+    /// The usbredir or gadget server, when that is the transport.
+    remote: Option<Remote>,
+    /// A usbredir guest has the device, or a gadget's host has it
+    /// configured.
     guest: bool,
     placed: Option<Placed>,
     unplugged: bool,
@@ -830,10 +938,10 @@ impl Ctx {
     /// the kernel has configured it, the log goes on in section `resume`
     /// when given, so that its enumeration is not in a run's section.
     fn attach(&mut self, want: Option<u8>, resume: Option<&str>) -> Result<Value> {
-        if let Some(redir) = &self.redir {
+        if let Some(remote) = &self.remote {
             // The server resets the bus and announces the device; the
-            // guest's enumeration follows on its own time.
-            redir.connect();
+            // guest's or host's enumeration follows on its own time.
+            remote.connect();
             if let Some(name) = resume {
                 self.section(name);
             }
@@ -881,8 +989,8 @@ impl Ctx {
 
     fn take_off(&mut self) -> Result<Option<u8>> {
         self.placed = None;
-        if let Some(redir) = &self.redir {
-            redir.disconnect();
+        if let Some(remote) = &self.remote {
+            remote.disconnect();
             return Ok(None);
         }
         match &mut self.attachment {
@@ -891,10 +999,10 @@ impl Ctx {
         }
     }
 
-    /// Whether the device is put somewhere: on this machine, or in a
-    /// guest.
+    /// Whether the device is put somewhere: on this machine, in a
+    /// guest, or on a controller.
     fn served(&self) -> bool {
-        self.attachment.is_some() || self.redir.is_some()
+        self.attachment.is_some() || self.remote.is_some()
     }
 
     /// A fresh model behind the device, from the current options: its
@@ -972,7 +1080,7 @@ impl Ctx {
     fn signal(&mut self, signal: Signal, section: String) -> Result<()> {
         match signal {
             Signal::Renumeration(Renumeration { .. }) => {
-                if self.redir.is_some() {
+                if self.remote.is_some() {
                     // The server did the disconnect and the connect.
                     self.emit("renumerated", json!({}));
                 } else if self.attachment.is_some() {
@@ -1011,7 +1119,7 @@ impl fmt::Debug for Ctx {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ctx")
             .field("addr", &self.addr)
-            .field("redir", &self.redir)
+            .field("remote", &self.remote)
             .field("placed", &self.placed)
             .field("unplugged", &self.unplugged)
             .finish_non_exhaustive()
@@ -1051,6 +1159,12 @@ impl Session {
     /// TCP port 0 is resolved).
     pub fn usbredir_address(&self) -> Option<&Address> {
         self.redir_address.as_ref()
+    }
+
+    /// The controller the device is on, when it is served through a
+    /// gadget (`auto` is resolved).
+    pub fn gadget(&self) -> Option<&str> {
+        self.ctx.remote.as_ref().and_then(Remote::udc)
     }
 
     /// The `devid` of the device, which a USB/IP client's URBs carry.
@@ -1128,8 +1242,7 @@ impl Session {
                     }
                 }
                 Ok(Input::Signal(signal, section)) => self.ctx.signal(signal, section)?,
-                Ok(Input::Link(link)) => {
-                    let connected = link == usbredir::Link::Connected;
+                Ok(Input::Link(connected)) => {
                     self.ctx.guest = connected;
                     self.ctx.emit(if connected { "ready" } else { "gone" }, json!({}));
                 }
@@ -1331,11 +1444,13 @@ fn status_command(ctx: &Ctx) -> Value {
     let d = device.descriptors();
     json!({
         "model": device.name(),
-        "transport": if ctx.redir.is_some() { "usbredir" } else { "usbip" },
+        "transport": ctx.remote.as_ref().map_or("usbip", Remote::name),
+        "udc": ctx.remote.as_ref().and_then(Remote::udc),
         "listen": ctx.addr.map(|a| a.to_string()),
         "devid": ctx.devid,
         "attached": placed,
-        "guest": ctx.redir.as_ref().map(|_| ctx.guest),
+        "guest": ctx.remote.as_ref().filter(|r| r.udc().is_none()).map(|_| ctx.guest),
+        "host": ctx.remote.as_ref().filter(|r| r.udc().is_some()).map(|_| ctx.guest),
         "unplugged": ctx.unplugged,
         "speed": speed_name(d.speed),
         "vendor": d.vendor_id(),
@@ -2007,5 +2122,19 @@ mod tests {
         let both =
             Builder::new(relay_factory()).attach(true).usbredir(Address::parse("127.0.0.1:0"));
         assert!(both.start().is_err());
+    }
+
+    #[cfg(feature = "gadget")]
+    #[test]
+    fn a_gadget_wants_a_controller_and_nothing_else() {
+        let none = Builder::new(relay_factory()).gadget("no-such-controller").start();
+        assert!(matches!(none, Err(Error::Attach(_))), "{none:?}");
+        let both = Builder::new(relay_factory()).attach(true).gadget("auto").start();
+        assert!(matches!(both, Err(Error::Invalid(_))), "{both:?}");
+        let both = Builder::new(relay_factory())
+            .usbredir(Address::parse("127.0.0.1:0"))
+            .gadget("auto")
+            .start();
+        assert!(matches!(both, Err(Error::Invalid(_))), "{both:?}");
     }
 }

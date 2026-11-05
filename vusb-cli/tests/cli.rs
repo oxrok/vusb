@@ -20,8 +20,13 @@ impl Server {
 
     /// With more arguments to `vusb run`.
     fn start_with(more: &[&str]) -> Server {
+        Server::run("hid-relay", more)
+    }
+
+    /// A `vusb run` of `example`, with more arguments.
+    fn run(example: &str, more: &[&str]) -> Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_vusb"))
-            .args(["run", "hid-relay", "--listen", "127.0.0.1:0", "--control", "127.0.0.1:0"])
+            .args(["run", example, "--listen", "127.0.0.1:0", "--control", "127.0.0.1:0"])
             .args(more)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -121,7 +126,7 @@ fn the_log_takes_a_format() {
 fn the_examples_are_listed_and_a_bad_one_is_refused() {
     let list = Command::new(env!("CARGO_BIN_EXE_vusb")).arg("list").output().expect("vusb runs");
     let text = String::from_utf8_lossy(&list.stdout);
-    for name in ["hid-relay", "cdc-echo", "ftdi-loopback", "uac-mic", "uvc-cam"] {
+    for name in ["hid-relay", "cdc-echo", "ftdi-loopback", "msc-disk", "uac-mic", "uvc-cam"] {
         assert!(text.contains(name), "{text}");
     }
     let bad = Command::new(env!("CARGO_BIN_EXE_vusb"))
@@ -129,4 +134,45 @@ fn the_examples_are_listed_and_a_bad_one_is_refused() {
         .output()
         .expect("vusb runs");
     assert_eq!(bad.status.code(), Some(1));
+}
+
+#[test]
+fn a_disk_image_is_named_on_the_command_line_only() {
+    let path = std::env::temp_dir().join(format!("vusb-cli-disk-{}.img", std::process::id()));
+    std::fs::write(&path, vec![0; 64 * 512]).expect("the image is written");
+    let file = format!("file={}", path.display());
+    let mut server = Server::run("msc-disk", &["-o", &file]);
+    // Other options leave the file where it is; the file itself stays.
+    server.ok(&["options", "not-ready=2"]);
+    server.ok(&["reset"]);
+    server.ok(&["options", &file]);
+    let refused = server.ctl(&["options", "file=/etc/hostname"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("command line"));
+    server.ok(&["quit"]);
+    assert_eq!(server.child.wait().expect("vusb ends").code(), Some(0));
+    std::fs::remove_file(&path).expect("the image goes");
+
+    // And a disk in memory takes none afterwards.
+    let mut server = Server::run("msc-disk", &["-o", "size=1"]);
+    assert_eq!(server.ctl(&["options", &file]).status.code(), Some(1));
+    server.ok(&["quit"]);
+    assert_eq!(server.child.wait().expect("vusb ends").code(), Some(0));
+}
+
+#[test]
+fn a_gadget_wants_a_controller_and_nothing_else() {
+    let run = |more: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_vusb"))
+            .args(["run", "hid-relay", "--listen", "127.0.0.1:0"])
+            .args(more)
+            .output()
+            .expect("vusb runs")
+    };
+    let none = run(&["--gadget", "no-such-controller"]);
+    assert_eq!(none.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&none.stderr).contains("controller"));
+    // Not with the other ways to put a device somewhere.
+    assert_eq!(run(&["--gadget", "auto", "--attach"]).status.code(), Some(2));
+    assert_eq!(run(&["--gadget", "auto", "--usbredir", "127.0.0.1:0"]).status.code(), Some(2));
 }

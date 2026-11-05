@@ -7,9 +7,14 @@
 //!   is on the machine itself.
 //! - [`usbredir`]: usbredir, which QEMU's `usb-redir` device speaks, so
 //!   the device is inside a virtual machine, on any platform QEMU runs.
+//! - [`gadget`]: Linux's Raw Gadget driver, so the device is on a USB
+//!   device controller of this machine, at the end of a cable.
 //!
-//! Both are codecs around one [`crate::bus::Bus`].
+//! All are codecs around one [`crate::bus::Bus`].
 
+#[cfg(feature = "gadget")]
+pub mod gadget;
+#[cfg(any(feature = "usbip", feature = "usbredir"))]
 pub mod socket;
 #[cfg(feature = "usbip")]
 pub mod usbip;

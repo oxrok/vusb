@@ -1,6 +1,6 @@
 [package]
 name = "vusb"
-description = "Virtual USB devices: a device model contract, class shells (HID, CDC-ACM, FTDI, EZ-USB), and the hosts that put a model on the bus (USB/IP with vhci-hcd, in-process)"
+description = "Virtual USB devices: a device model contract, class shells (HID, CDC-ACM, FTDI, EZ-USB, mass storage), and the hosts that put a model on the bus (USB/IP with vhci-hcd, usbredir, a USB gadget, in-process)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,10 @@ default = ["usbip", "usbredir", "control", "fixture"]
 usbip = []
 # The usbredir server, for QEMU's usb-redir device.
 usbredir = []
+# The gadget server, for a USB device controller of this machine: Linux's
+# Raw Gadget driver. Off by default: it brings the `libc` crate on Linux,
+# and the crate's only unsafe code, the driver's ioctls.
+gadget = ["dep:libc"]
 # Sessions and their control socket: JSON lines, from vusb-ctl or any client.
 control = ["usbip", "usbredir", "fixture", "dep:serde_json"]
 # The transaction log in the fixture dialect, with SHA-256 digests of long data.
@@ -28,6 +32,9 @@ all-features = true
 [dependencies]
 serde_json = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2", optional = true }
 
 [lints]
 workspace = true
