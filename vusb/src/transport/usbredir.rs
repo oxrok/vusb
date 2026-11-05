@@ -640,12 +640,14 @@ impl Connection<'_> {
                 device_connect(desc, self.caps),
             )
         };
-        self.send(&ep)?;
-        self.send(&iface)?;
-        self.send(&dev)?;
+        // The link is marked before the guest hears of it: whoever
+        // sees the device announced finds the handle saying so. A send
+        // that fails ends the connection, which marks it gone.
         self.present = true;
         self.server.link(Link::Connected);
-        Ok(())
+        self.send(&ep)?;
+        self.send(&iface)?;
+        self.send(&dev)
     }
 
     /// `ep_info` and `interface_info` again, after a configuration or
@@ -675,8 +677,8 @@ impl Connection<'_> {
         self.pending.clear();
         self.receiving.clear();
         self.streams.clear();
-        self.send(&Packet::new(DEVICE_DISCONNECT, 0, Vec::new()))?;
         self.server.link(Link::Gone);
+        self.send(&Packet::new(DEVICE_DISCONNECT, 0, Vec::new()))?;
         if self.caps.has(CAP_DEVICE_DISCONNECT_ACK) {
             self.awaiting_ack = Some(again);
             Ok(())
