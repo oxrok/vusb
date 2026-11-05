@@ -35,7 +35,7 @@ echo_test() {
 }
 
 mkdir -p /tmp
-last=none
+last=
 while :; do
     now=$(devices)
     if [ "$now" != "$last" ]; then

@@ -76,8 +76,9 @@ grep '^VUSB-GUEST:' "$console"
 ctl status | grep -E '^(transport|guest|configuration)='
 
 echo "--- unplug"
+gone=$(said gone)
 ctl unplug
-guest_says gone 1 120
+guest_says gone $((gone + 1)) 120
 echo "--- replug"
 ctl replug
 guest_says checked 2 240

@@ -39,7 +39,7 @@ enum Command {
     /// Lists the example devices.
     List,
     /// Serves an example device until told to stop.
-    Run(Run),
+    Run(Box<Run>),
     /// Detaches the ports a crashed run left attached (Linux, root).
     Cleanup {
         /// Every attached port, not only vusb's.
@@ -120,7 +120,7 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::Run(args) => serve(args),
+        Command::Run(args) => serve(*args),
     }
 }
 
