@@ -204,8 +204,13 @@ impl<W: Write + Send> Log<W> {
 
 impl<W: Write + Send> Observer for Log<W> {
     fn transfer(&mut self, t: &Transfer) {
+        let held = t.outcome == Outcome::Held;
+        // No text for a line nobody reads.
+        if held && !self.verbose {
+            return;
+        }
         let text = line(t, &self.rules);
-        if t.outcome == Outcome::Held {
+        if held {
             self.comment(&format!("seq {}: {text} (held)", t.seqnum));
         } else {
             self.write(&text);

@@ -656,9 +656,22 @@ impl Hub {
 
 impl Observer for Hub {
     fn transfer(&mut self, t: &Transfer) {
+        let streaming = self.subscribers.iter().any(|s| s.transfers);
+        if self.log.is_none() && !streaming {
+            return;
+        }
+        // Only the text something reads: the fixture format writes its
+        // own line, and the plain one is the log's or a subscriber's.
+        let fixture = self.fixture(|log| log.transfer(t));
+        if fixture && !streaming {
+            return;
+        }
         let line = t.line();
-        if !self.fixture(|log| log.transfer(t)) {
+        if !fixture {
             self.log_line(&line);
+        }
+        if !streaming {
+            return;
         }
         let setup = t.setup.map(|s| {
             json!({
