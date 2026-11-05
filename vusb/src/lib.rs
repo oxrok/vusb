@@ -97,7 +97,12 @@
 //! [`iso_out`](model::DeviceModel::iso_out) takes one. A streaming
 //! model counts those calls for its time: [`examples::uac_mic`] sends
 //! 48 samples a call, [`examples::uvc_cam`] three lines of a picture,
-//! and neither reads a clock.
+//! and neither reads a clock. A stream is then as fast as the host
+//! asks, which a test likes. A model whose
+//! [`realtime`](model::DeviceModel::realtime) says `true` has the bus
+//! give every service interval its time instead, so a second of sound
+//! takes a second; the two examples do with `realtime=1`. The waiting
+//! is the bus's, and what the model sends is the same.
 //!
 //! A model answers each transfer with [`Reply::Data`](model::Reply),
 //! [`Reply::Nak`](model::Reply) or [`Reply::Stall`](model::Reply), and

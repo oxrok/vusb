@@ -17,6 +17,7 @@ Serves an example device, and on Linux attaches it to the machine through
 vusb list                       # the example devices
 sudo modprobe vhci-hcd
 sudo vusb run hid-relay --attach --open-devices --control /tmp/relay.sock
+sudo vusb run uac-mic -o realtime=1 --attach    # a microphone, in real time
 sudo vusb cleanup               # the ports a killed run left attached
 ```
 
@@ -29,6 +30,11 @@ serial port that echoes, an FTDI chip looped back, a USB Audio
 microphone that hears a tone, and a USB Video camera that sees a test
 pattern; a product's own devices
 run from its own program, on the library's `Session`.
+
+The microphone and the camera stream as fast as the host asks: two seconds
+of sound are recorded in a fraction of one, which suits a test. With
+`-o realtime=1` they keep real time, which suits a sound server or a camera
+program. `vusb-ctl options realtime=1` and `reset` switch a running device.
 
 ## vusb-ctl
 

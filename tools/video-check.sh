@@ -1,7 +1,8 @@
 #!/bin/sh
 # Attaches the test pattern camera through vhci-hcd and captures from it
 # with the kernel's uvcvideo: a stream the host negotiates, checked
-# frame by frame. Needs root, vhci-hcd, uvcvideo and v4l2-ctl.
+# frame by frame, first as fast as the host asks and then in real time.
+# Needs root, vhci-hcd, uvcvideo and v4l2-ctl.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 dir=$(mktemp -d)
@@ -35,18 +36,32 @@ until video=$(node) && [ -n "$video" ]; do
     sleep 0.1
 done
 v4l2-ctl -d "/dev/$video" --get-fmt-video | sed -n 's/^\t\(Width\|Pixel\)/\1/p'
-v4l2-ctl -d "/dev/$video" --stream-mmap --stream-count=20 --stream-to="$dir/capture.raw" \
-    >/dev/null 2>&1
-# Twenty frames, each the pattern byte for byte. The host takes them as
-# fast as it can, so it skips some: their numbers only have to rise.
-numbers=$(sh "$here/frames.sh" "$dir/capture.raw")
-echo "captured frames:" $numbers
-[ "$(echo "$numbers" | wc -l)" = 20 ]
-last=-1
-for n in $numbers; do
-    [ "$n" -gt "$last" ] || { echo "frame $n after frame $last"; exit 1; }
-    last=$n
-done
+# Captures $1 frames and checks each is the pattern, byte for byte. A
+# host that is slow to take one skips it, so their numbers only have to
+# rise. How long the capture took, in milliseconds, is left in $took.
+capture() {
+    began=$(date +%s%N)
+    v4l2-ctl -d "/dev/$video" --stream-mmap --stream-count="$1" \
+        --stream-to="$dir/capture.raw" >/dev/null 2>&1
+    took=$((($(date +%s%N) - began) / 1000000))
+    numbers=$(sh "$here/frames.sh" "$dir/capture.raw")
+    echo "captured in $took ms, frames:" $numbers
+    [ "$(echo "$numbers" | wc -l)" = "$1" ]
+    last=-1
+    for n in $numbers; do
+        [ "$n" -gt "$last" ] || { echo "frame $n after frame $last"; exit 1; }
+        last=$n
+    done
+}
+# As fast as the host asks: twenty frames take much less than a second.
+capture 20
+# In real time, a fresh model with the option: 25 frames a second, so 50
+# take two seconds, and not much more on a machine that is busy.
+$ctl options realtime=1
+$ctl reset
+capture 50
+[ "$took" -ge 1900 ] || { echo "50 frames in $took ms: not in real time"; exit 1; }
+[ "$took" -lt 8000 ] || { echo "50 frames took $took ms"; exit 1; }
 violations=$($ctl status | sed -n 's/^violations=//p')
 $ctl quit
 wait "$server" || true

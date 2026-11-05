@@ -88,6 +88,11 @@ impl Device {
         self.model.take_renumeration()
     }
 
+    /// See [`DeviceModel::realtime`].
+    pub fn realtime(&self) -> bool {
+        self.model.realtime()
+    }
+
     /// See [`DeviceModel::in_submitted`].
     pub fn in_submitted(&mut self, ep: u8, max: usize) {
         self.model.in_submitted(ep & 0x0f, max);

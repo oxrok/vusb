@@ -34,6 +34,8 @@ Four design choices follow from that:
 - **Models have no I/O, threads or clocks.** They are plain state machines, so
   they are easy to write and run the same everywhere. A model that needs time
   counts the host's offers, so a run does not depend on how fast the machine is.
+  A stream that has to move at its real rate says so (`DeviceModel::realtime`),
+  and the bus does the waiting: the model sends the same packets either way.
 - **There is one bus.** Tests and transports all drive the same `Bus`, so a device
   that passes in a unit test behaves the same way for the kernel.
 - **Checking is built in.** `Device` flags what breaks USB, and a model flags what

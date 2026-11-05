@@ -15,6 +15,12 @@
 //! The model keeps no clock. Each [`DeviceModel::iso_in`] is the next
 //! packet, so the frames a host captures are those the model produced,
 //! however fast it asked.
+//!
+//! As fast as the host asks is many more than 25 frames a second, which
+//! a test likes and a camera program does not. With `realtime=1` the
+//! device keeps real time ([`DeviceModel::realtime`]): the bus gives
+//! every packet its millisecond, and a frame takes 40 ms. The frames
+//! are the same.
 
 use crate::descriptor::{self, DeviceDescriptor};
 use crate::model::{Descriptors, DeviceModel, ISOCHRONOUS, Reply, Setup, Speed, Violations};
@@ -25,7 +31,8 @@ use crate::{Error, Result};
 pub const NAME: &str = "uvc-cam";
 /// One line about the device and its options, for a host that lists its models.
 pub const ABOUT: &str = "a USB Video camera that sees a test pattern (160x120 YUY2, 25 fps, \
-     isochronous IN); drop=N (every Nth packet is lost)";
+     isochronous IN); drop=N (every Nth packet is lost), realtime=1 (25 frames take a second; \
+     default 0, as fast as the host asks)";
 
 /// The picture's width, in pixels.
 pub const WIDTH: usize = 160;
@@ -103,6 +110,8 @@ pub struct UvcCam {
     descriptors: Descriptors,
     /// Every this many packets one is lost.
     drop: Option<u32>,
+    /// Whether the bus is to give every packet its millisecond.
+    realtime: bool,
     /// Whether the host committed the format since the last reset.
     committed: bool,
     /// The frame being sent, counted from power on.
@@ -119,6 +128,7 @@ impl UvcCam {
         UvcCam {
             descriptors: descriptors(),
             drop: None,
+            realtime: false,
             committed: false,
             frame: 0,
             packet: 0,
@@ -382,6 +392,10 @@ impl DeviceModel for UvcCam {
         Some(bytes)
     }
 
+    fn realtime(&self) -> bool {
+        self.realtime
+    }
+
     fn reset(&mut self) {
         self.committed = false;
         self.frame = 0;
@@ -390,7 +404,7 @@ impl DeviceModel for UvcCam {
     }
 }
 
-/// The device, from `drop=N`.
+/// The device, from `drop=N` and `realtime=1`.
 ///
 /// # Errors
 ///
@@ -400,6 +414,7 @@ pub fn build(options: &[(String, String)]) -> Result<Box<dyn DeviceModel>> {
     for (k, v) in options {
         match k.as_str() {
             "drop" => cam.drop = Some(parse_number(k, v, 2..=1_000_000)?),
+            "realtime" => cam.realtime = parse_number(k, v, 0..=1)? == 1,
             other => return Err(Error::Invalid(format!("{NAME} has no option {other}"))),
         }
     }
@@ -545,6 +560,29 @@ mod tests {
         assert_eq!(bits(&frame(0x8001), 3)[..2], [1, 0]);
         let rec = rec.lock().unwrap();
         assert!(rec.violations.is_empty(), "{:?}", rec.violations);
+    }
+
+    #[test]
+    fn in_real_time_a_frame_takes_forty_milliseconds_and_is_the_same() {
+        use std::time::{Duration, Instant};
+
+        use crate::bus::{Step, Urb};
+
+        assert!(!build(&[]).unwrap().realtime(), "as fast as the host asks, unless told");
+        assert!(build(&[("realtime".to_owned(), "yes".to_owned())]).is_err());
+        let (mut bus, _) = camera(&[("realtime", "1")]);
+        enumerate(&mut bus).unwrap();
+        negotiate(&mut bus);
+        let t0 = Instant::now();
+        let urb = Urb::iso_read(1, EP_VIDEO, vec![PACKET; PACKETS_PER_FRAME]);
+        assert_eq!(bus.submit_at(urb, t0), Step::default());
+        let forty = Duration::from_millis(40);
+        assert_eq!(bus.next_due(), Some(t0 + forty), "25 frames a second");
+        assert_eq!(bus.poll_at(t0 + Duration::from_micros(39_999)), Step::default());
+        let step = bus.poll_at(t0 + forty);
+        let got = pictures(&step.completions[0]);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].1 == frame(0), "frame 0, as without the option");
     }
 
     #[test]

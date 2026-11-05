@@ -61,7 +61,9 @@ let session = Builder::new(factory)
   `bInterval`; QEMU asks for it once and gets what arrives.
 - **Isochronous streams run on vusb's clock.** QEMU starts a stream once,
   and vusb then offers the device a packet per service interval and sends
-  each on. The model still sees one call per interval.
+  each on. The model still sees one call per interval. So a stream is in
+  real time in a guest whether the model asks for it (`realtime=1` on the
+  examples) or not; over USB/IP it is only when the model asks.
 - **Timing in the guest is the guest's.** A model that counts the host's
   offers behaves as over USB/IP; what the guest's drivers do in between is
   as real as on hardware.

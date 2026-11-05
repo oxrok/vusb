@@ -99,7 +99,8 @@ fn main() -> vusb::Result<()> {
 Without a shell, a model implements `DeviceModel` directly. The
 [`examples`](https://github.com/oxrok/vusb/tree/main/vusb/src/examples) module
 has a short model on each kind of shell, and a microphone and a camera
-that stream. The API is documented on
+that stream: as fast as the host asks, or in real time with `-o realtime=1`.
+The API is documented on
 [docs.rs](https://docs.rs/vusb).
 
 ## How it works

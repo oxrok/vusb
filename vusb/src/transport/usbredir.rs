@@ -47,7 +47,10 @@
 //! says `start_iso_stream` once, and for an IN endpoint the server then
 //! offers the device one packet per service interval of the endpoint,
 //! by its own clock, and sends each on. The model still sees one call
-//! per interval and keeps no time itself.
+//! per interval and keeps no time itself. So a stream is in real time
+//! here whatever [`DeviceModel::realtime`](crate::model::DeviceModel::realtime)
+//! says: the server submits each packet when its interval comes
+//! ([`Bus::submit_timed`]).
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -60,7 +63,7 @@ use std::time::{Duration, Instant};
 use crate::arm::Event;
 use crate::bus::{Bus, Completion, Signal, Status, Step, Unlink, Urb};
 use crate::descriptor;
-use crate::model::{CONTROL, Descriptors, INTERRUPT, ISOCHRONOUS, Setup, Speed};
+use crate::model::{CONTROL, Descriptors, Endpoint, INTERRUPT, ISOCHRONOUS, Setup, Speed};
 use crate::transport::socket::{Accepted, Address, ListenOptions, Listener, Reader, Writer};
 use crate::{Error, Result};
 
@@ -365,18 +368,15 @@ impl IsoStream {
     /// stream that fell behind does not flood the guest to catch up.
     const BURST: u32 = 64;
 
-    /// A stream on an endpoint with this `bInterval`: 2^(n-1) frames at
-    /// full speed, microframes at high speed.
-    fn new(speed: Speed, interval: u8, max_packet: u16) -> IsoStream {
-        let unit: u64 = if speed == Speed::High { 125 } else { 1000 };
-        let micros = unit << u32::from(interval.clamp(1, 16) - 1);
+    /// A stream on this endpoint of a device of this speed.
+    fn new(speed: Speed, endpoint: Endpoint) -> IsoStream {
         IsoStream {
             next: 0,
             started: Instant::now(),
             offered: 0,
-            period: Duration::from_micros(micros),
+            period: endpoint.iso_interval(speed),
             // The low 11 bits; the rest say how many per microframe.
-            max: usize::from(max_packet & 0x07ff),
+            max: usize::from(endpoint.max_packet & 0x07ff),
         }
     }
 
@@ -799,8 +799,7 @@ impl Connection<'_> {
                 let status = match found {
                     Some(e) if e.transfer_type() == ISOCHRONOUS => {
                         if endpoint & 0x80 != 0 {
-                            self.streams
-                                .insert(endpoint, IsoStream::new(speed, e.interval, e.max_packet));
+                            self.streams.insert(endpoint, IsoStream::new(speed, e));
                         }
                         SUCCESS
                     }
@@ -940,7 +939,8 @@ impl Connection<'_> {
                 if endpoint & 0x80 == 0 {
                     let seq = self.seq();
                     let urb = Urb::iso_write(seq, endpoint & 0x0f, &[&p[4..]]);
-                    let step = self.server.bus().submit(urb);
+                    // The guest kept its time.
+                    let step = self.server.bus().submit_timed(urb);
                     self.deliver(step)?;
                 }
             }
@@ -958,7 +958,7 @@ impl Connection<'_> {
             for _ in 0..count {
                 let seq = self.seq();
                 let urb = Urb::iso_read(seq, endpoint & 0x0f, vec![max]);
-                let step = self.server.bus().submit(urb);
+                let step = self.server.bus().submit_timed(urb);
                 let sent = step.completions.iter().find(|c| c.seqnum == seq).cloned();
                 if let Some(c) = sent
                     && let (Some(packet), Some(stream)) =
@@ -1645,6 +1645,11 @@ mod tests {
             }
             fn iso_out(&mut self, _: u8, data: &[u8], _: &mut Violations) {
                 self.2.lock().unwrap().push(data.to_vec());
+            }
+            // The server times the stream itself, so a device that
+            // keeps real time is not made to wait twice.
+            fn realtime(&self) -> bool {
+                true
             }
             fn reset(&mut self) {}
         }

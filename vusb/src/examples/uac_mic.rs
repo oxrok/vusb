@@ -10,6 +10,12 @@
 //! The model keeps no clock. Each [`DeviceModel::iso_in`] is one frame,
 //! so the tone's phase is a count of the samples sent: a recording has
 //! exactly the samples the model produced, however fast the host asked.
+//!
+//! As fast as the host asks is faster than sound, which a test likes
+//! and a sound server does not. With `realtime=1` the device keeps real
+//! time ([`DeviceModel::realtime`]): the bus gives every frame its
+//! millisecond, and a second of tone takes a second. The samples are
+//! the same.
 
 use std::f64::consts::TAU;
 
@@ -22,7 +28,8 @@ use crate::{Error, Result};
 pub const NAME: &str = "uac-mic";
 /// One line about the device and its options, for a host that lists its models.
 pub const ABOUT: &str = "a USB Audio microphone that hears a tone (48 kHz mono, isochronous IN); \
-     tone=HZ (20 to 20000, default 1000), silent=N (no packet in every Nth frame)";
+     tone=HZ (20 to 20000, default 1000), silent=N (no packet in every Nth frame), \
+     realtime=1 (a second of sound takes a second; default 0, as fast as the host asks)";
 
 /// The sample rate.
 pub const RATE: u32 = 48_000;
@@ -46,6 +53,8 @@ pub struct UacMic {
     tone: u32,
     /// No packet in every this many frames: a device that drops out.
     silent: Option<u32>,
+    /// Whether the bus is to give every frame its millisecond.
+    realtime: bool,
     /// Samples sent since power on.
     sample: u64,
     frame: u32,
@@ -54,7 +63,14 @@ pub struct UacMic {
 impl UacMic {
     /// A microphone hearing a tone of `tone` Hz.
     pub fn new(tone: u32) -> UacMic {
-        UacMic { descriptors: descriptors(), tone, silent: None, sample: 0, frame: 0 }
+        UacMic {
+            descriptors: descriptors(),
+            tone,
+            silent: None,
+            realtime: false,
+            sample: 0,
+            frame: 0,
+        }
     }
 
     /// The samples of the next frame, as the device sends them:
@@ -179,13 +195,17 @@ impl DeviceModel for UacMic {
         Some(self.frame())
     }
 
+    fn realtime(&self) -> bool {
+        self.realtime
+    }
+
     fn reset(&mut self) {
         self.sample = 0;
         self.frame = 0;
     }
 }
 
-/// The device, from `tone=HZ` and `silent=N`.
+/// The device, from `tone=HZ`, `silent=N` and `realtime=1`.
 ///
 /// # Errors
 ///
@@ -196,6 +216,7 @@ pub fn build(options: &[(String, String)]) -> Result<Box<dyn DeviceModel>> {
         match k.as_str() {
             "tone" => mic.tone = parse_number(k, v, 20..=20_000)?,
             "silent" => mic.silent = Some(parse_number(k, v, 2..=1_000_000)?),
+            "realtime" => mic.realtime = parse_number(k, v, 0..=1)? == 1,
             other => return Err(Error::Invalid(format!("{NAME} has no option {other}"))),
         }
     }
@@ -252,5 +273,27 @@ mod tests {
         assert_eq!(at(96), sample(500, 96));
         assert_eq!(at(143), sample(500, 143));
         assert!(build(&[("tone".to_owned(), "5".to_owned())]).is_err());
+    }
+
+    #[test]
+    fn in_real_time_a_frame_takes_its_millisecond_and_the_tone_is_the_same() {
+        use std::time::{Duration, Instant};
+
+        use crate::bus::{Step, Urb};
+
+        assert!(!build(&[]).unwrap().realtime(), "as fast as the host asks, unless told");
+        assert!(!build(&[("realtime".to_owned(), "0".to_owned())]).unwrap().realtime());
+        assert!(build(&[("realtime".to_owned(), "2".to_owned())]).is_err());
+        let options = [("realtime".to_owned(), "1".to_owned())];
+        let mut bus = Bus::new(Device::new(build(&options).unwrap()));
+        enumerate(&mut bus).unwrap();
+        let t0 = Instant::now();
+        assert_eq!(bus.submit_at(Urb::iso_read(1, EP_AUDIO, vec![96; 10]), t0), Step::default());
+        let ten = Duration::from_millis(10);
+        assert_eq!(bus.next_due(), Some(t0 + ten), "ten frames, ten milliseconds");
+        let step = bus.poll_at(t0 + ten);
+        let mut fast = Bus::new(Device::new(build(&[]).unwrap()));
+        enumerate(&mut fast).unwrap();
+        assert_eq!(step.completions[0].data, fast.iso_read(EP_AUDIO, &[96; 10]).data);
     }
 }

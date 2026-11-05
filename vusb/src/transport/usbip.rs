@@ -13,7 +13,10 @@
 //! unlinks, and the bus's completions into PDUs. What a host controller
 //! does (holding a transfer answered NAK and offering it again after every
 //! other transfer and every 20 ms, keeping each endpoint's order,
-//! cutting a babble) is the bus's.
+//! cutting a babble) is the bus's. So is the time of an isochronous
+//! stream: the URBs of a device that keeps real time
+//! ([`crate::model::DeviceModel::realtime`]) are answered when the bus
+//! says they are due, and the others at once.
 //!
 //! When the model asks to renumerate
 //! ([`crate::model::DeviceModel::take_renumeration`]), the server tells
@@ -23,13 +26,14 @@
 //!
 //! Every transfer, violation and notice goes to the bus's observers.
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::bus::{Bus, Completion, Signal, Status, Step, Unlink, Urb};
 use crate::model::{Descriptors, Setup, Speed};
@@ -446,11 +450,20 @@ impl Server {
             }
         });
         let mut out = stream;
+        // The packets of the isochronous URBs not answered yet, as the
+        // host laid them out: its answer gives them back.
+        let mut asked: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            match rx.recv_timeout(TICK) {
+            // An isochronous URB of a device in real time is answered
+            // when its time comes, not a tick later.
+            let wait = self
+                .bus()
+                .next_due()
+                .map_or(TICK, |due| due.saturating_duration_since(Instant::now()).min(TICK));
+            match rx.recv_timeout(wait) {
                 Ok(Pdu::Submit(submit)) => {
                     if submit.devid != self.devid() {
                         self.bus().violation(&format!(
@@ -459,12 +472,14 @@ impl Server {
                             self.devid()
                         ));
                     }
-                    // An isochronous URB completes within its submission.
-                    let asked = submit.iso.clone();
+                    if !submit.iso.is_empty() {
+                        asked.insert(submit.seqnum, submit.iso.clone());
+                    }
                     let produced = self.bus().submit(submit.urb());
-                    self.deliver(&mut out, produced, &asked)?;
+                    self.deliver(&mut out, produced, &mut asked)?;
                 }
                 Ok(Pdu::Unlink { seqnum, target }) => {
+                    asked.remove(&target);
                     let status = match self.bus().unlink(target) {
                         Unlink::NotHeld => 0,
                         Unlink::Cancelled => ECONNRESET,
@@ -481,19 +496,29 @@ impl Server {
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
             let produced = self.bus().poll();
-            self.deliver(&mut out, produced, &[])?;
+            self.deliver(&mut out, produced, &mut asked)?;
+            if self.bus().unplugged() {
+                // What an unplugged device held is never answered.
+                asked.clear();
+            }
         }
     }
 
     /// Answers the completions of a step and passes its signals on.
-    /// `asked` is the packets of the isochronous URB just submitted,
-    /// whose completion is in this step.
-    fn deliver(&self, out: &mut TcpStream, step: Step, asked: &[(u32, u32)]) -> io::Result<()> {
+    /// `asked` has the packets of the isochronous URBs submitted, as
+    /// the host laid them out; the ones answered leave it.
+    fn deliver(
+        &self,
+        out: &mut TcpStream,
+        step: Step,
+        asked: &mut HashMap<u32, Vec<(u32, u32)>>,
+    ) -> io::Result<()> {
         for c in &step.completions {
             if c.iso.is_empty() {
                 write_completion(out, c)?;
             } else {
-                write_ret_submit_iso(out, c, asked)?;
+                let packets = asked.remove(&c.seqnum).unwrap_or_default();
+                write_ret_submit_iso(out, c, &packets)?;
             }
         }
         for signal in step.signals {
@@ -784,36 +809,11 @@ mod tests {
 
     /// An isochronous IN on 0x83 that sends its interval's number, and
     /// nothing in every third; an isochronous OUT on 0x04.
-    struct Stream(crate::model::Descriptors, u8, Arc<Mutex<Vec<Vec<u8>>>>);
+    struct Stream(crate::model::Descriptors, u8, Arc<Mutex<Vec<Vec<u8>>>>, bool);
 
-    impl DeviceModel for Stream {
-        fn name(&self) -> &'static str {
-            "stream"
-        }
-        fn descriptors(&self) -> &crate::model::Descriptors {
-            &self.0
-        }
-        fn control(&mut self, _: Setup, _: &[u8], _: &mut Violations) -> Reply {
-            Reply::ack()
-        }
-        fn out(&mut self, _: u8, _: &[u8], _: &mut Violations) -> Reply {
-            Reply::ack()
-        }
-        fn in_transfer(&mut self, _: u8, _: usize, _: &mut Violations) -> Reply {
-            Reply::Nak
-        }
-        fn iso_in(&mut self, _: u8, _: usize, _: &mut Violations) -> Option<Vec<u8>> {
-            self.1 += 1;
-            (!self.1.is_multiple_of(3)).then(|| vec![self.1; usize::from(self.1)])
-        }
-        fn iso_out(&mut self, _: u8, data: &[u8], _: &mut Violations) {
-            self.2.lock().unwrap().push(data.to_vec());
-        }
-        fn reset(&mut self) {}
-    }
-
-    #[test]
-    fn isochronous_urbs_carry_their_packets_both_ways() {
+    /// The device, keeping real time or not, and what its OUT endpoint
+    /// got: full speed and `bInterval` 1, a packet a millisecond.
+    fn stream(realtime: bool) -> (Stream, Arc<Mutex<Vec<Vec<u8>>>>) {
         use crate::descriptor::{self, DeviceDescriptor};
         let mut body = Vec::new();
         body.extend_from_slice(&descriptor::interface(0, 0, 2, [0xff, 0, 0], 0));
@@ -839,7 +839,94 @@ mod tests {
             },
             0,
             Arc::clone(&got),
+            realtime,
         );
+        (model, got)
+    }
+
+    impl DeviceModel for Stream {
+        fn name(&self) -> &'static str {
+            "stream"
+        }
+        fn descriptors(&self) -> &crate::model::Descriptors {
+            &self.0
+        }
+        fn control(&mut self, _: Setup, _: &[u8], _: &mut Violations) -> Reply {
+            Reply::ack()
+        }
+        fn out(&mut self, _: u8, _: &[u8], _: &mut Violations) -> Reply {
+            Reply::ack()
+        }
+        fn in_transfer(&mut self, _: u8, _: usize, _: &mut Violations) -> Reply {
+            Reply::Nak
+        }
+        fn iso_in(&mut self, _: u8, _: usize, _: &mut Violations) -> Option<Vec<u8>> {
+            self.1 += 1;
+            (!self.1.is_multiple_of(3)).then(|| vec![self.1; usize::from(self.1)])
+        }
+        fn iso_out(&mut self, _: u8, data: &[u8], _: &mut Violations) {
+            self.2.lock().unwrap().push(data.to_vec());
+        }
+        fn realtime(&self) -> bool {
+            self.3
+        }
+        fn reset(&mut self) {}
+    }
+
+    /// A device that keeps real time has its URBs answered when their
+    /// service intervals are over, in order, each with the packets the
+    /// host laid out; one unlinked before its time is cancelled.
+    #[test]
+    fn in_real_time_isochronous_urbs_are_answered_when_due() {
+        let (model, got) = stream(true);
+        let served = serve(Box::new(model));
+        let devid = served.devid;
+        let (mut s, _) = import(served.addr, "1-1").unwrap();
+        s.write_all(&cmd_submit(1, devid, DIR_OUT, 0, 0, Some(setup(0x00, 9, 1, 0, 0)), &[]))
+            .unwrap();
+        assert_eq!(read_ret(&mut s, false).unwrap().status, 0);
+        // Three URBs of ten packets, one of 150 and one of 1000, submitted
+        // together as a driver does: the first four are 180 packets,
+        // 180 ms, each answered when its last packet's time is over.
+        let started = Instant::now();
+        for seqnum in 2..5 {
+            s.write_all(&cmd_submit_iso(seqnum, devid, DIR_IN, 3, &[8; 10], &[])).unwrap();
+        }
+        s.write_all(&cmd_submit_iso(5, devid, DIR_IN, 3, &[8; 150], &[])).unwrap();
+        s.write_all(&cmd_submit_iso(6, devid, DIR_IN, 3, &[8; 1000], &[])).unwrap();
+        let mut last = Duration::ZERO;
+        for (seqnum, packets, at_least) in [(2, 10, 10), (3, 10, 20), (4, 10, 30), (5, 150, 180)] {
+            let r = read_ret_iso(&mut s, true, packets).unwrap();
+            let elapsed = started.elapsed();
+            assert_eq!((r.seqnum, r.status, r.iso.len()), (seqnum, 0, packets));
+            assert!(elapsed >= Duration::from_millis(at_least), "seq {seqnum} after {elapsed:?}");
+            last = elapsed;
+        }
+        // And not much later, even on a machine that is busy.
+        assert!(last < Duration::from_secs(1), "the last after {last:?}");
+        // The last has a second to go: cancelled, it is never answered
+        // and the device never sees it.
+        s.write_all(&cmd_unlink(7, 6)).unwrap();
+        let r = read_ret(&mut s, false).unwrap();
+        assert_eq!((r.command, r.seqnum, r.status), (RET_UNLINK, 7, ECONNRESET));
+        // An OUT URB keeps the same time.
+        let started = Instant::now();
+        s.write_all(&cmd_submit_iso(8, devid, DIR_OUT, 4, &[1; 25], &[7; 25])).unwrap();
+        let r = read_ret_iso(&mut s, false, 25).unwrap();
+        assert_eq!((r.seqnum, r.status), (8, 0));
+        assert!(started.elapsed() >= Duration::from_millis(25), "{:?}", started.elapsed());
+        assert_eq!(got.lock().unwrap().len(), 25);
+        drop(s);
+        let rec = served.stop();
+        let rec = rec.lock().unwrap();
+        let seen: Vec<u32> = rec.transfers.iter().map(|t| t.seqnum).collect();
+        assert_eq!(seen, [1, 2, 3, 4, 5, 8]);
+        assert!(rec.violations.is_empty(), "{:?}", rec.violations);
+    }
+
+    #[test]
+    fn isochronous_urbs_carry_their_packets_both_ways() {
+        let (model, got) = stream(false);
         let served = serve(Box::new(model));
         let devid = served.devid;
         let (mut s, _) = import(served.addr, "1-1").unwrap();

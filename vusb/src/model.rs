@@ -3,6 +3,8 @@
 
 //! The device model contract.
 
+use std::time::Duration;
+
 /// A setup packet, the eight bytes of a control transfer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Setup {
@@ -137,6 +139,14 @@ impl Endpoint {
     /// [`CONTROL`], [`ISOCHRONOUS`], [`BULK`] or [`INTERRUPT`].
     pub fn transfer_type(self) -> u8 {
         self.attributes & 3
+    }
+
+    /// The service interval of an isochronous endpoint on a device of
+    /// this speed, from `bInterval`: 2^(n-1) frames of 1 ms at full
+    /// speed, microframes of 125 µs at high speed.
+    pub fn iso_interval(self, speed: Speed) -> Duration {
+        let unit: u64 = if speed == Speed::High { 125 } else { 1000 };
+        Duration::from_micros(unit << u32::from(self.interval.clamp(1, 16) - 1))
     }
 }
 
@@ -400,6 +410,22 @@ pub trait DeviceModel: Send {
         v.report(format!("isochronous OUT to endpoint {ep}, which the model does not serve"));
     }
 
+    /// Whether the device's isochronous streams keep real time. The
+    /// model still reads no clock and never waits, and one call of
+    /// [`DeviceModel::iso_in`] or [`DeviceModel::iso_out`] is still one
+    /// service interval; it is the host that waits. A
+    /// [`Bus`](crate::bus::Bus) whose device says `true` completes an
+    /// isochronous transfer when the service interval of its last
+    /// packet is over, as a host controller does, so a stream moves at
+    /// the rate its descriptors say: a microphone gives a second of
+    /// sound in a second. By default `false`: a transfer completes when
+    /// it is submitted, as fast as the host asks, which is what a test
+    /// wants. Asked at every isochronous transfer, so the answer may
+    /// change while the device runs. What moves is the same either way.
+    fn realtime(&self) -> bool {
+        false
+    }
+
     /// Whether the model wants to leave the bus and come back with
     /// what [`DeviceModel::descriptors`] says now, as an EZ-USB device
     /// does once its new firmware runs. Asked after every transfer; a
@@ -443,4 +469,21 @@ pub enum StandardFault {
     Stall,
     /// The answer cut to this many bytes.
     Short(usize),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_isochronous_interval_is_in_frames_or_microframes() {
+        let endpoint =
+            |interval| Endpoint { address: 0x81, attributes: 1, max_packet: 64, interval };
+        assert_eq!(endpoint(1).iso_interval(Speed::Full), Duration::from_millis(1));
+        assert_eq!(endpoint(4).iso_interval(Speed::Full), Duration::from_millis(8));
+        assert_eq!(endpoint(1).iso_interval(Speed::High), Duration::from_micros(125));
+        assert_eq!(endpoint(4).iso_interval(Speed::High), Duration::from_millis(1));
+        // A value no descriptor may have still gives an interval.
+        assert_eq!(endpoint(0).iso_interval(Speed::Full), Duration::from_millis(1));
+    }
 }

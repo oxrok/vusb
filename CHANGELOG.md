@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Isochronous streams in real time, when the device asks:
+  `DeviceModel::realtime`, `false` by default. The model still reads no
+  clock and sends the same packets; the bus gives every service interval
+  its time, so a transfer completes when the interval of its last packet
+  is over, and the transfers of an endpoint follow each other with no
+  gap. `uac-mic` and `uvc-cam` take `realtime=1`: a second of sound takes
+  a second and the camera gives 25 frames a second, where without it the
+  host gets them as fast as it asks. `Bus::submit_at` and `Bus::poll_at`
+  take the time, for a test with its own; `Bus::next_due` says when to
+  poll next, and the USB/IP server wakes for it; `Bus::submit_timed` is
+  for a transport that times its streams itself, as usbredir does, where
+  a stream was in real time already. `Endpoint::iso_interval` is an
+  isochronous endpoint's service interval. `tools/audio-check.sh` and
+  `tools/video-check.sh` check both ways.
+
 ## 0.2.1 (2026-11-05)
 
 - A second transaction log format, `fixture`, beside the default: the

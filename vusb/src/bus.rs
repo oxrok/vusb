@@ -23,6 +23,13 @@
 //! - An isochronous transfer is offered one packet per service
 //!   interval and completes at once, with a status per packet: it has
 //!   no handshake, so nothing is held.
+//! - For a device that keeps real time
+//!   ([`DeviceModel::realtime`]), the service intervals take their
+//!   time: an isochronous transfer waits until the interval of its last
+//!   packet is over and completes at the next [`Bus::poll`], and the
+//!   transfers of one endpoint follow each other with no gap, as the
+//!   frames of a host controller do. The bus reads the clock; the model
+//!   does not.
 //! - An armed [`Arm`] is counted and fires once; an unplug drops the
 //!   held transfers and every one submitted until the next
 //!   [`Bus::reset`], as a device that is gone answers nothing.
@@ -58,6 +65,9 @@
 //! assert_eq!(bus.unlink(2), Unlink::Cancelled);
 //! assert_eq!(bus.held(), 0);
 //! ```
+
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::arm::{Arm, Event};
 use crate::device::Device;
@@ -258,11 +268,26 @@ pub enum Unlink {
     Completed(Completion),
 }
 
+/// An isochronous transfer of a device that keeps real time, waiting
+/// for its service intervals.
+#[derive(Clone, Debug)]
+struct Scheduled {
+    urb: Urb,
+    /// When the service interval of its last packet is over.
+    due: Instant,
+}
+
 /// A host controller around a device.
 pub struct Bus {
     device: Device,
     observers: Vec<SharedObserver>,
     held: Vec<Urb>,
+    /// In the order submitted, so in the order due on each endpoint.
+    scheduled: Vec<Scheduled>,
+    /// Where the next service interval of each isochronous endpoint
+    /// that keeps real time begins: the end of the last transfer
+    /// scheduled on it.
+    frames: Vec<((u8, bool), Instant)>,
     armed: Option<Arm>,
     gone: bool,
     next: u32,
@@ -273,6 +298,7 @@ impl std::fmt::Debug for Bus {
         f.debug_struct("Bus")
             .field("device", &self.device)
             .field("held", &self.held)
+            .field("scheduled", &self.scheduled)
             .field("armed", &self.armed)
             .field("gone", &self.gone)
             .finish_non_exhaustive()
@@ -286,7 +312,16 @@ const PATIENCE: u32 = 10_000;
 impl Bus {
     /// A bus with `device` on it, just attached.
     pub fn new(device: Device) -> Bus {
-        Bus { device, observers: Vec::new(), held: Vec::new(), armed: None, gone: false, next: 1 }
+        Bus {
+            device,
+            observers: Vec::new(),
+            held: Vec::new(),
+            scheduled: Vec::new(),
+            frames: Vec::new(),
+            armed: None,
+            gone: false,
+            next: 1,
+        }
     }
 
     /// An observer of everything the host does; several are called in
@@ -330,6 +365,8 @@ impl Bus {
     pub fn reset(&mut self) {
         self.device.reset();
         self.held.clear();
+        self.scheduled.clear();
+        self.frames.clear();
         self.gone = false;
     }
 
@@ -339,9 +376,17 @@ impl Bus {
         self.gone
     }
 
-    /// Transfers held.
+    /// Transfers held: the ones the device answers with NAK, the ones
+    /// behind them, and the isochronous ones waiting for their time.
     pub fn held(&self) -> usize {
-        self.held.len()
+        self.held.len() + self.scheduled.len()
+    }
+
+    /// When the next isochronous transfer waiting for its time is due:
+    /// a [`Bus::poll`] then completes it, so a transport that serves a
+    /// device in real time polls no later. `None` when nothing waits.
+    pub fn next_due(&self) -> Option<Instant> {
+        self.scheduled.iter().map(|s| s.due).min()
     }
 
     fn observe(&self, f: impl Fn(&mut dyn Observer)) {
@@ -365,7 +410,9 @@ impl Bus {
     /// [`Bus::reset`]. What an armed unplug does, on request.
     pub fn unplug(&mut self) {
         self.gone = true;
-        for u in std::mem::take(&mut self.held) {
+        self.frames.clear();
+        let waiting = std::mem::take(&mut self.scheduled).into_iter().map(|s| s.urb);
+        for u in std::mem::take(&mut self.held).into_iter().chain(waiting) {
             self.comment(&format!("seq {}: dropped, the device is unplugged", u.seqnum));
         }
     }
@@ -396,8 +443,66 @@ impl Bus {
     }
 
     /// Submits a transfer: it completes now, or is held, or waits behind
-    /// a held transfer of its endpoint.
+    /// a held transfer of its endpoint. An isochronous transfer of a
+    /// device that keeps real time waits for its service intervals,
+    /// counted from now ([`Bus::submit_at`]).
     pub fn submit(&mut self, urb: Urb) -> Step {
+        self.submit_at(urb, Instant::now())
+    }
+
+    /// Submits a transfer at the time `now`, which is what
+    /// [`Bus::submit`] does with the clock's; a test gives its own
+    /// times here and to [`Bus::poll_at`], and waits for nothing.
+    ///
+    /// The time matters to an isochronous transfer of a device that
+    /// keeps real time ([`DeviceModel::realtime`]). Its first packet
+    /// takes the service interval after the last one scheduled on the
+    /// endpoint, or the one that begins now when the endpoint was idle,
+    /// and the transfer completes at the first poll after the interval
+    /// of its last packet. The device is offered the packets then, all
+    /// of them, so a transfer the host unlinks first never reached it.
+    pub fn submit_at(&mut self, urb: Urb, now: Instant) -> Step {
+        self.enter(urb, Some(now))
+    }
+
+    /// Submits an isochronous transfer whose service intervals the host
+    /// has timed itself, as a transport with a stream clock of its own
+    /// does (usbredir): it completes now, whether the device keeps real
+    /// time or not. Any other transfer is submitted as by
+    /// [`Bus::submit`].
+    pub fn submit_timed(&mut self, urb: Urb) -> Step {
+        self.enter(urb, None)
+    }
+
+    /// The service interval of the endpoint of `urb`, when the transfer
+    /// is isochronous and the device keeps real time.
+    fn pace(&self, urb: &Urb) -> Option<Duration> {
+        if urb.iso.is_empty() || !self.device.realtime() {
+            return None;
+        }
+        let endpoint = self.device.endpoint(urb.address())?;
+        (endpoint.transfer_type() == ISOCHRONOUS)
+            .then(|| endpoint.iso_interval(self.device.descriptors().speed))
+    }
+
+    /// Keeps an isochronous transfer until its packets' service
+    /// intervals, each `period` long, are over.
+    fn schedule(&mut self, urb: Urb, period: Duration, now: Instant) {
+        let key = urb.key();
+        let packets = u32::try_from(urb.iso.len()).unwrap_or(u32::MAX);
+        let idle = self.frames.iter().position(|(k, _)| *k == key);
+        // An endpoint that was idle starts now: the intervals nothing
+        // was submitted for are not made up.
+        let start = idle.map_or(now, |i| self.frames[i].1.max(now));
+        let due = start + period * packets;
+        match idle {
+            Some(i) => self.frames[i].1 = due,
+            None => self.frames.push((key, due)),
+        }
+        self.scheduled.push(Scheduled { urb, due });
+    }
+
+    fn enter(&mut self, urb: Urb, now: Option<Instant>) -> Step {
         let mut step = Step::default();
         if self.gone {
             self.comment(&format!(
@@ -426,14 +531,27 @@ impl Bus {
             self.held.push(urb);
             return step;
         }
+        if let Some(now) = now
+            && let Some(period) = self.pace(&urb)
+        {
+            self.schedule(urb, period, now);
+            return step;
+        }
         self.offer(urb, true, &mut step);
         step
     }
 
     /// Offers every held transfer again, the ones behind a transfer
-    /// still held excepted. A transport calls it after every submission
-    /// and every so often (20 ms is what a kernel's retry feels like).
+    /// still held excepted, and completes the isochronous transfers
+    /// whose time has come. A transport calls it after every submission
+    /// and every so often (20 ms is what a kernel's retry feels like),
+    /// and at [`Bus::next_due`] when that is sooner.
     pub fn poll(&mut self) -> Step {
+        self.poll_at(Instant::now())
+    }
+
+    /// [`Bus::poll`] at the time `now`, see [`Bus::submit_at`].
+    pub fn poll_at(&mut self, now: Instant) -> Step {
         let mut step = Step::default();
         let pending = std::mem::take(&mut self.held);
         // Endpoints whose oldest transfer is still held this round: the
@@ -453,11 +571,42 @@ impl Bus {
                 blocked.push(key);
             }
         }
+        for waiting in std::mem::take(&mut self.scheduled) {
+            if self.gone {
+                let seqnum = waiting.urb.seqnum;
+                self.comment(&format!("seq {seqnum}: dropped, the device is unplugged"));
+            } else if waiting.due <= now {
+                self.isochronous(&waiting.urb, &mut step);
+            } else {
+                self.scheduled.push(waiting);
+            }
+        }
         step
     }
 
     /// Cancels a held transfer.
     pub fn unlink(&mut self, seqnum: u32) -> Unlink {
+        if let Some(i) = self.scheduled.iter().position(|s| s.urb.seqnum == seqnum) {
+            let urb = self.scheduled.remove(i).urb;
+            let key = urb.key();
+            self.comment(&format!(
+                "unlink seq {seqnum}: ep {:#04x} {} waiting for its time",
+                urb.ep,
+                urb.dir_word()
+            ));
+            // The endpoint's next interval follows what is still
+            // scheduled on it, or is the one at the next submission.
+            let last = self.scheduled.iter().filter(|s| s.urb.key() == key).map(|s| s.due).max();
+            match last {
+                Some(due) => {
+                    if let Some(frame) = self.frames.iter_mut().find(|(k, _)| *k == key) {
+                        frame.1 = due;
+                    }
+                }
+                None => self.frames.retain(|(k, _)| *k != key),
+            }
+            return Unlink::Cancelled;
+        }
         let Some(i) = self.held.iter().position(|u| u.seqnum == seqnum) else {
             self.comment(&format!("unlink seq {seqnum}: already completed"));
             return Unlink::NotHeld;
@@ -735,8 +884,9 @@ impl Bus {
     }
 
     /// Submits a transfer and polls until it completes, up to a host's
-    /// patience; then unlinks it ([`Status::Unlinked`]). The signals of
-    /// those steps are dropped: a test that wants them uses
+    /// patience; then unlinks it ([`Status::Unlinked`]). An isochronous
+    /// transfer of a device that keeps real time is waited for. The
+    /// signals of those steps are dropped: a test that wants them uses
     /// [`Bus::submit`] and [`Bus::poll`].
     fn run(&mut self, urb: Urb) -> Completion {
         let seqnum = urb.seqnum;
@@ -747,6 +897,9 @@ impl Bus {
             }
             if self.gone {
                 break;
+            }
+            if let Some(due) = self.next_due() {
+                thread::sleep(due.saturating_duration_since(Instant::now()));
             }
             step = self.poll();
         }
@@ -998,6 +1151,7 @@ mod tests {
         descriptors: Descriptors,
         interval: u8,
         got: Vec<Vec<u8>>,
+        realtime: bool,
     }
 
     impl Stream {
@@ -1009,7 +1163,13 @@ mod tests {
             body.extend_from_slice(&descriptor::endpoint(0x04, 1, 8, 1));
             let mut d = vendor_descriptors();
             d.configs = vec![descriptor::configuration(1, 0, 0x80, 50, &body)];
-            Stream { descriptors: d, interval: 0, got: Vec::new() }
+            Stream { descriptors: d, interval: 0, got: Vec::new(), realtime: false }
+        }
+
+        /// The same device, keeping real time: full speed and
+        /// `bInterval` 1, so a packet a millisecond.
+        fn in_real_time() -> Stream {
+            Stream { realtime: true, ..Stream::new() }
         }
     }
 
@@ -1042,7 +1202,133 @@ mod tests {
         fn iso_out(&mut self, _: u8, data: &[u8], _: &mut Violations) {
             self.got.push(data.to_vec());
         }
-        fn reset(&mut self) {}
+        fn realtime(&self) -> bool {
+            self.realtime
+        }
+        fn reset(&mut self) {
+            self.interval = 0;
+        }
+    }
+
+    fn seqnums(step: &Step) -> Vec<u32> {
+        step.completions.iter().map(|c| c.seqnum).collect()
+    }
+
+    #[test]
+    fn in_real_time_an_isochronous_transfer_waits_for_its_service_intervals() {
+        let ms = Duration::from_millis;
+        let (mut bus, rec) = recorded(Device::new(Box::new(Stream::in_real_time())));
+        assert!(bus.control(setup(0x00, 9, 1, 0, 0), &[]).is_ok());
+        // Two transfers of three packets, submitted together as a driver
+        // does: the second follows the first with no gap.
+        let t0 = Instant::now();
+        assert_eq!(bus.submit_at(Urb::iso_read(10, 3, vec![8; 3]), t0), Step::default());
+        assert_eq!(bus.submit_at(Urb::iso_read(11, 3, vec![8; 3]), t0), Step::default());
+        assert_eq!((bus.held(), bus.next_due()), (2, Some(t0 + ms(3))));
+        assert_eq!(bus.poll_at(t0 + Duration::from_micros(2999)), Step::default());
+        assert_eq!(rec.lock().unwrap().transfers.len(), 1, "nothing reached the device yet");
+        let step = bus.poll_at(t0 + ms(3));
+        assert_eq!(seqnums(&step), [10]);
+        assert_eq!(step.completions[0].data, [1, 2, 2, 3, 3, 3]);
+        assert_eq!((bus.held(), bus.next_due()), (1, Some(t0 + ms(6))));
+        // The driver submits the first again: it follows the second. A
+        // poll that comes late completes all that is due, in order, and
+        // the stream is none the worse.
+        assert_eq!(bus.submit_at(Urb::iso_read(12, 3, vec![8; 3]), t0 + ms(3)), Step::default());
+        assert_eq!(bus.next_due(), Some(t0 + ms(6)));
+        assert_eq!(seqnums(&bus.poll_at(t0 + ms(8))), [11]);
+        assert_eq!(bus.next_due(), Some(t0 + ms(9)));
+        let step = bus.poll_at(t0 + ms(20));
+        assert_eq!(seqnums(&step), [12]);
+        let seen: Vec<(usize, Status)> =
+            step.completions[0].iso.iter().map(|p| (p.actual, p.status)).collect();
+        assert_eq!(seen, [(7, Status::Ok), (0, Status::Missed), (8, Status::Ok)]);
+        assert_eq!((bus.held(), bus.next_due()), (0, None));
+        // An endpoint left idle starts again at the submission: the
+        // intervals nobody asked for are not made up. Each endpoint has
+        // its own frames, the OUT one too.
+        let t1 = t0 + ms(50);
+        assert_eq!(bus.submit_at(Urb::iso_read(13, 3, vec![8]), t1), Step::default());
+        assert_eq!(bus.submit_at(Urb::iso_write(14, 4, &[&[1], &[2, 3]]), t1), Step::default());
+        assert_eq!(bus.next_due(), Some(t1 + ms(1)));
+        assert_eq!(seqnums(&bus.poll_at(t1 + ms(1))), [13]);
+        let step = bus.poll_at(t1 + ms(2));
+        assert_eq!((seqnums(&step), step.completions[0].actual), (vec![14], 3));
+        // A transfer that is not isochronous waits for nothing, and
+        // neither does one the host timed itself.
+        let step = bus.submit_at(Urb::control(15, setup(0x00, 9, 1, 0, 0), Vec::new()), t1);
+        assert_eq!(seqnums(&step), [15]);
+        assert_eq!(seqnums(&bus.submit_timed(Urb::iso_read(16, 3, vec![8]))), [16]);
+        // The log has each transfer when it completed.
+        let rec = rec.lock().unwrap();
+        let order: Vec<u32> = rec.transfers.iter().map(|t| t.seqnum).skip(1).collect();
+        assert_eq!(order, [10, 11, 12, 13, 14, 15, 16]);
+    }
+
+    #[test]
+    fn in_real_time_an_unlinked_transfer_never_reached_the_device() {
+        let ms = Duration::from_millis;
+        let (mut bus, rec) = recorded(Device::new(Box::new(Stream::in_real_time())));
+        assert!(bus.control(setup(0x00, 9, 1, 0, 0), &[]).is_ok());
+        let t0 = Instant::now();
+        for seqnum in 20..23 {
+            assert_eq!(bus.submit_at(Urb::iso_read(seqnum, 3, vec![8; 4]), t0), Step::default());
+        }
+        // Without the last, the next submitted takes its intervals.
+        assert_eq!(bus.unlink(22), Unlink::Cancelled);
+        assert_eq!(bus.submit_at(Urb::iso_read(23, 3, vec![8; 4]), t0), Step::default());
+        assert_eq!(bus.poll_at(t0 + ms(11)).completions.len(), 2);
+        assert_eq!(seqnums(&bus.poll_at(t0 + ms(12))), [23]);
+        assert_eq!(bus.unlink(23), Unlink::NotHeld);
+        // With all of them gone the endpoint is idle: the next starts at
+        // its submission, and gets the device's next packets.
+        for seqnum in 24..26 {
+            assert_eq!(bus.submit_at(Urb::iso_read(seqnum, 3, vec![8; 4]), t0), Step::default());
+        }
+        assert_eq!((bus.unlink(24), bus.unlink(25)), (Unlink::Cancelled, Unlink::Cancelled));
+        assert_eq!((bus.held(), bus.next_due()), (0, None));
+        assert_eq!(bus.submit_at(Urb::iso_read(26, 3, vec![8]), t0 + ms(13)), Step::default());
+        let step = bus.poll_at(t0 + ms(14));
+        assert_eq!(seqnums(&step), [26]);
+        assert_eq!(step.completions[0].data, [13; 8], "the thirteenth interval");
+        // A reset forgets what waits, and so does an unplug, which says so.
+        assert_eq!(bus.submit_at(Urb::iso_read(27, 3, vec![8; 4]), t0), Step::default());
+        bus.reset();
+        assert_eq!((bus.held(), bus.next_due()), (0, None));
+        assert!(bus.control(setup(0x00, 9, 1, 0, 0), &[]).is_ok());
+        assert_eq!(bus.submit_at(Urb::iso_read(28, 3, vec![8; 4]), t0), Step::default());
+        bus.unplug();
+        assert_eq!((bus.held(), bus.next_due()), (0, None));
+        assert_eq!(bus.poll_at(t0 + ms(100)), Step::default());
+        let rec = rec.lock().unwrap();
+        assert!(
+            rec.notices.iter().any(|n| n == "unlink seq 22: ep 0x03 IN waiting for its time"),
+            "{:?}",
+            rec.notices
+        );
+        assert!(rec.notices.iter().any(|n| n == "seq 28: dropped, the device is unplugged"));
+        let seen: Vec<u32> = rec.transfers.iter().map(|t| t.seqnum).filter(|n| *n >= 20).collect();
+        assert_eq!(seen, [20, 21, 23, 26]);
+    }
+
+    #[test]
+    fn in_real_time_a_transfer_run_to_completion_takes_its_time() {
+        let mut bus = Bus::new(Device::new(Box::new(Stream::in_real_time())));
+        assert!(bus.control(setup(0x00, 9, 1, 0, 0), &[]).is_ok());
+        let started = Instant::now();
+        let c = bus.iso_read(3, &[8; 5]);
+        assert!(started.elapsed() >= Duration::from_millis(5), "{:?}", started.elapsed());
+        assert_eq!((c.status, c.iso.len()), (Status::Ok, 5));
+        // And an armed unplug fires when the transfer completes.
+        bus.arm(Arm::new(Event::Unplug, When::In { ep: 3, n: 1 }));
+        let now = Instant::now();
+        assert_eq!(bus.submit_at(Urb::iso_read(90, 3, vec![8]), now), Step::default());
+        assert_eq!(bus.submit_at(Urb::iso_read(91, 3, vec![8]), now), Step::default());
+        let step = bus.poll_at(now + Duration::from_millis(2));
+        assert_eq!(seqnums(&step), [90]);
+        assert_eq!(step.signals, [Signal::Fired(Event::Unplug)]);
+        assert!(bus.unplugged());
+        assert_eq!(bus.held(), 0, "the one behind it went with the device");
     }
 
     #[test]
