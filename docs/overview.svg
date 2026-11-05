@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 615" width="900" role="img" aria-label="A program or a test reaches your device model through the same bus and device layers. vusb-ctl controls it while it runs.">
-  <title>A program or a test reaches your device model through the same bus and device layers. vusb-ctl controls it while it runs.</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 615" width="1080" role="img" aria-label="A program, a host on a cable or a test reaches your device model through the same bus and device layers. vusb-ctl controls it while it runs.">
+  <title>A program, a host on a cable or a test reaches your device model through the same bus and device layers. vusb-ctl controls it while it runs.</title>
   <style>.nf{fill:none}.rd{stroke-linecap:round;stroke-linejoin:round}.w5{stroke-width:5}.w8{stroke-width:8}.w9{stroke-width:9}.w10{stroke-width:10}.w12{stroke-width:12}.w4{stroke-width:4}.w6{stroke-width:6}.w7{stroke-width:7}.fb{fill:#0969da}.fa{fill:#bf8700}.sb{stroke:#0969da}.sa{stroke:#bf8700}.si{stroke:#1f2328}
   text { font-family: -apple-system, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; fill: #1f2328; font-size: 13px; }
   .t { font-weight: 600; font-size: 15px; }
@@ -34,7 +34,7 @@
     <marker id="h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M0 0 L10 5 L0 10 z"/></marker>
     <marker id="hs" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M10 0 L0 5 L10 10 z"/></marker>
   </defs>
-  <rect class="edge" x="20" y="118" width="860" height="397" rx="10"/>
+  <rect class="edge" x="20" y="118" width="1040" height="397" rx="10"/>
   <g transform="translate(34 124) scale(.36)"><g transform="translate(0 6) scale(.88)"><path class="sb w5 rd nf" d="M4 36H13"/><path class="sb w5 rd nf" d="M4 50H13"/><path class="sb w5 rd nf" d="M4 64H13"/><path class="sa w5 rd nf" d="M96 36H87"/><path class="sa w5 rd nf" d="M96 50H87"/><path class="sa w5 rd nf" d="M96 64H87"/><path class="sb w5 rd nf" d="M36 4V13M36 96V87"/><path class="sa w5 rd nf" d="M64 4V13M64 96V87"/><path class="sb w5 rd nf" d="M50 19H27a8 8 0 0 0-8 8V73a8 8 0 0 0 8 8H50"/>
 <path class="sa w5 nf" stroke-dasharray="6 4.5" d="M50 19H73a8 8 0 0 1 8 8V73a8 8 0 0 1-8 8H50"/>
 <path class="sb w10 rd nf" d="M35 37L50 65"/><path class="sa w10 rd nf" d="M65 37L50 65"/></g><g transform="translate(92 14)"><path class="si w8 rd nf" d="M4 20L22 60L40 20"/>
@@ -47,12 +47,12 @@
   <rect class="box" x="250" y="30" width="160" height="56" rx="7"/>
   <text class="t" x="330.0" y="55.0" text-anchor="middle">Linux kernel</text>
   <text class="s" x="330.0" y="73.0" text-anchor="middle">vhci-hcd</text>
-  <rect class="box" x="470" y="30" width="180" height="56" rx="7"/>
-  <text class="t" x="560.0" y="55.0" text-anchor="middle">Your test</text>
-  <text class="s" x="560.0" y="73.0" text-anchor="middle">no kernel, no root</text>
-  <rect class="box" x="700" y="30" width="170" height="56" rx="7"/>
-  <text class="t" x="785.0" y="55.0" text-anchor="middle">vusb-ctl</text>
-  <text class="s" x="785.0" y="73.0" text-anchor="middle">or any client</text>
+  <rect class="box" x="650" y="30" width="180" height="56" rx="7"/>
+  <text class="t" x="740.0" y="55.0" text-anchor="middle">Your test</text>
+  <text class="s" x="740.0" y="73.0" text-anchor="middle">no kernel, no root</text>
+  <rect class="box" x="880" y="30" width="170" height="56" rx="7"/>
+  <text class="t" x="965.0" y="55.0" text-anchor="middle">vusb-ctl</text>
+  <text class="s" x="965.0" y="73.0" text-anchor="middle">or any client</text>
   <path class="a" d="M190 58 L248 58" marker-end="url(#h)"/>
   <text class="l" x="219" y="50" text-anchor="middle">USB</text>
   <rect class="box" x="250" y="150" width="160" height="56" rx="7"/>
@@ -60,20 +60,29 @@
   <text class="s" x="330.0" y="193.0" text-anchor="middle">one device per socket</text>
   <path class="a" d="M330 86 L330 148" marker-end="url(#h)"/>
   <text class="l" x="338" y="106" text-anchor="start">USB/IP over TCP</text>
-  <rect class="box" x="700" y="150" width="170" height="56" rx="7"/>
-  <text class="t" x="785.0" y="175.0" text-anchor="middle">Session</text>
-  <text class="s" x="785.0" y="193.0" text-anchor="middle">one queue for all input</text>
-  <path class="a" d="M785 86 L785 148" marker-end="url(#h)"/>
-  <text class="l" x="793" y="106" text-anchor="start">JSON lines</text>
-  <rect class="bus" x="50" y="250" width="600" height="56" rx="7"/>
-  <text class="t" x="350.0" y="275.0" text-anchor="middle">Bus</text>
-  <text class="s" x="350.0" y="293.0" text-anchor="middle">the host controller: holds what the device NAKs, keeps each endpoint in order</text>
+  <rect class="box" x="450" y="30" width="160" height="56" rx="7"/>
+  <text class="t" x="530.0" y="55.0" text-anchor="middle">Any host</text>
+  <text class="s" x="530.0" y="73.0" text-anchor="middle">at the end of a cable</text>
+  <rect class="box" x="450" y="150" width="160" height="56" rx="7"/>
+  <text class="t" x="530.0" y="175.0" text-anchor="middle">Gadget server</text>
+  <text class="s" x="530.0" y="193.0" text-anchor="middle">on a device controller</text>
+  <path class="a" d="M530 86 L530 148" marker-end="url(#h)"/>
+  <text class="l" x="538" y="106" text-anchor="start">USB, raw_gadget</text>
+  <path class="a" d="M530 206 L530 248" marker-end="url(#h)"/>
+  <rect class="box" x="880" y="150" width="170" height="56" rx="7"/>
+  <text class="t" x="965.0" y="175.0" text-anchor="middle">Session</text>
+  <text class="s" x="965.0" y="193.0" text-anchor="middle">one queue for all input</text>
+  <path class="a" d="M965 86 L965 148" marker-end="url(#h)"/>
+  <text class="l" x="973" y="106" text-anchor="start">JSON lines</text>
+  <rect class="bus" x="50" y="250" width="780" height="56" rx="7"/>
+  <text class="t" x="440.0" y="275.0" text-anchor="middle">Bus</text>
+  <text class="s" x="440.0" y="293.0" text-anchor="middle">the host controller: holds what the device NAKs, keeps each endpoint in order</text>
   <path class="a" d="M330 206 L330 248" marker-end="url(#h)"/>
   <text class="l" x="338" y="232" text-anchor="start">submit, unlink</text>
-  <path class="a" d="M560 86 L560 248" marker-end="url(#h)"/>
-  <text class="l" x="568" y="172" text-anchor="start">read(), write()</text>
-  <path class="a" d="M785 206 L785 278 L652 278" marker-end="url(#h)"/>
-  <text class="l" x="718" y="270" text-anchor="middle">reset, unplug, arm</text>
+  <path class="a" d="M740 86 L740 248" marker-end="url(#h)"/>
+  <text class="l" x="748" y="172" text-anchor="start">read(), write()</text>
+  <path class="a" d="M965 206 L965 278 L832 278" marker-end="url(#h)"/>
+  <text class="l" x="898" y="270" text-anchor="middle">reset, unplug, arm</text>
   <rect class="box" x="50" y="346" width="500" height="56" rx="7"/>
   <text class="t" x="300.0" y="371.0" text-anchor="middle">Device</text>
   <text class="s" x="300.0" y="389.0" text-anchor="middle">answers the standard requests, checks everything the host does</text>
@@ -81,7 +90,7 @@
   <text class="l" x="308" y="330" text-anchor="start">offers a transfer, gets Data, NAK or STALL</text>
   <rect class="opt" x="50" y="442" width="500" height="56" rx="7"/>
   <text class="t" x="300.0" y="467.0" text-anchor="middle">Shell (optional)</text>
-  <text class="s" x="300.0" y="485.0" text-anchor="middle">what a kind of device shares: HID, CDC-ACM, FTDI, EZ-USB</text>
+  <text class="s" x="300.0" y="485.0" text-anchor="middle">what a kind of device shares: HID, CDC-ACM, FTDI, EZ-USB, mass storage</text>
   <path class="a" d="M300 402 L300 440" marker-end="url(#h)" marker-start="url(#hs)"/>
   <text class="l" x="308" y="426" text-anchor="start">class and vendor requests</text>
   <rect class="you" x="50" y="545" width="500" height="56" rx="7"/>
@@ -89,9 +98,9 @@
   <text class="s" x="300.0" y="588.0" text-anchor="middle">descriptors, control, in, out, reset. Plain Rust with no I/O.</text>
   <path class="a" d="M300 498 L300 543" marker-end="url(#h)" marker-start="url(#hs)"/>
   <text class="l" x="308" y="534" text-anchor="start">what the bytes mean</text>
-  <rect class="box" x="700" y="346" width="170" height="56" rx="7"/>
-  <text class="t" x="785.0" y="371.0" text-anchor="middle">Observers</text>
-  <text class="s" x="785.0" y="389.0" text-anchor="middle">log, count, live stream</text>
-  <path class="a" d="M610 306 L610 374 L698 374" marker-end="url(#h)"/>
-  <text class="l" x="654" y="366" text-anchor="middle">every transfer</text>
+  <rect class="box" x="880" y="346" width="170" height="56" rx="7"/>
+  <text class="t" x="965.0" y="371.0" text-anchor="middle">Observers</text>
+  <text class="s" x="965.0" y="389.0" text-anchor="middle">log, count, live stream</text>
+  <path class="a" d="M790 306 L790 374 L878 374" marker-end="url(#h)"/>
+  <text class="l" x="834" y="366" text-anchor="middle">every transfer</text>
 </svg>

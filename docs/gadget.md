@@ -23,9 +23,14 @@ for the only one.
   to a host controller of the same machine, so the device is on the machine
   itself, as with `--attach`. It is the way to try a gadget out with no
   board: `sudo modprobe dummy_hcd`.
-- **The `raw_gadget` module**, Linux 5.7 on (`CONFIG_USB_RAW_GADGET`). Not
-  every distribution builds it, nor `dummy_hcd`: Arch has both, Ubuntu has
-  `raw_gadget`, Fedora has `dummy_hcd`.
+- **The `raw_gadget` module.**
+  [Raw Gadget](https://docs.kernel.org/usb/raw-gadget.html) is in mainline
+  Linux since 5.7 (`CONFIG_USB_RAW_GADGET`), but not every distribution builds
+  it, nor `dummy_hcd`: Arch has both, Ubuntu has `raw_gadget`, Fedora has
+  `dummy_hcd`. For a kernel without one,
+  [xairy/raw-gadget](https://github.com/xairy/raw-gadget) has both to build
+  out of tree, in `raw_gadget/` and `dummy_hcd/`. Under Secure Boot the module
+  must be signed.
 - **Root.** `/dev/raw-gadget` and the controller's `soft_connect` are root's.
 
 ## Driving it

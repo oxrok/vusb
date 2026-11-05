@@ -2,10 +2,11 @@
 
 ## How the parts fit
 
-A program or a test reaches your device model through the same bus and device
-layers. You write the yellow box. vusb is everything inside the dashed line.
+A program, a host on a cable or a test reaches your device model through the
+same bus and device layers. You write the yellow box. vusb is everything inside
+the dashed line.
 
-![A program or a test reaches your device model through the same bus and device layers, and vusb-ctl controls it while it runs.](https://raw.githubusercontent.com/oxrok/vusb/main/docs/overview.svg)
+![A program, a host on a cable or a test reaches your device model through the same bus and device layers, and vusb-ctl controls it while it runs.](https://raw.githubusercontent.com/oxrok/vusb/main/docs/overview.svg)
 
 - **Bus** is the host controller. Tests and transports all drive it.
 - **Device** answers the standard requests every USB device must, and checks what

@@ -118,6 +118,22 @@ start. Bad blocks and a disk that is slow to spin up are options:
 The API is documented on
 [docs.rs](https://docs.rs/vusb).
 
+## On a real cable
+
+On a board with a USB device port, a Raspberry Pi or a Beagle board, the same
+model is a device at the end of a cable, for any host and operating system:
+
+```sh
+sudo modprobe raw_gadget
+sudo vusb run msc-disk -o file=disk.img --gadget auto
+```
+
+It goes through Linux's
+[Raw Gadget](https://docs.kernel.org/usb/raw-gadget.html) driver, in mainline
+since 5.7. See
+[gadget](https://github.com/oxrok/vusb/blob/main/docs/gadget.md) for what it
+needs and how it differs.
+
 ## How it works
 
 A model never waits. Asked for data it does not have, it answers NAK and returns,
@@ -141,9 +157,8 @@ See the [control protocol](https://github.com/oxrok/vusb/blob/main/docs/control.
   guest takes one on any platform, with no root: see
   [QEMU](https://github.com/oxrok/vusb/blob/main/docs/qemu.md). Models and
   tests run on Linux, macOS and Windows.
-- A device on a real cable, for any host, needs a board with a USB device
-  port, Linux's `raw_gadget` module and root: see
-  [gadget](https://github.com/oxrok/vusb/blob/main/docs/gadget.md).
+- A device on a real cable needs a board with a USB device port, Linux's
+  `raw_gadget` module and root.
 - No hubs or super speed yet.
 - The API may change before 1.0.
 
