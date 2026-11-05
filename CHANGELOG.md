@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-05)
 
 - usbredir, a second transport: `transport::usbredir::Server` serves the
   device to QEMU's `usb-redir` device, so it is inside a virtual machine
