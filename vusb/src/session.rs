@@ -1891,6 +1891,38 @@ mod tests {
     }
 
     #[test]
+    fn a_program_keeps_a_fixture_log_of_its_own() {
+        // No log of the session's: an observer from the start, whose
+        // rules the program changes while the session runs.
+        let log = Arc::new(Mutex::new(fixture::Log::new(Vec::new(), Rules::default())));
+        let shared: SharedObserver = log.clone();
+        let mut r = start(Builder::new(relay_factory()).observer(shared));
+        let mut s = r.device();
+        r.client.call("section", &json!({"name": "run"})).unwrap();
+        r.feature(&mut s, 2);
+        log.lock().unwrap().set_rules(Rules::digest_above(4));
+        r.feature(&mut s, 3);
+        // A subscriber still gets the plain line, whatever is logged.
+        r.client.call("subscribe", &json!({"topics": ["tx"]})).unwrap();
+        r.feature(&mut s, 4);
+        let seen = r.client.next_event().unwrap().unwrap();
+        assert_eq!(seen["line"], "control a1 01 0300 0000 0008 -> 4142434445000000");
+        r.end();
+        let log = log.lock().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(log.get_ref()),
+            "# section attach\n\
+             ctl_out 00 09 0001 0000 - -> ok\n\
+             # section run\n\
+             ctl_in 21 01 0300 0000 8 -> 4142434445000000\n\
+             ctl_in 21 01 0300 0000 8 -> \
+             @8:c300361ae74b2fae5864684afc8dab8a19e4a431b02b93457424ffba180a0955\n\
+             ctl_in 21 01 0300 0000 8 -> \
+             @8:c300361ae74b2fae5864684afc8dab8a19e4a431b02b93457424ffba180a0955\n"
+        );
+    }
+
+    #[test]
     fn a_stopper_ends_the_session_and_several_clients_are_served() {
         let session =
             Builder::new(relay_factory()).control(Address::parse("127.0.0.1:0")).start().unwrap();
