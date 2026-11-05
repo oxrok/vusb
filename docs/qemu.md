@@ -59,7 +59,9 @@ let session = Builder::new(factory)
   QEMU one chardev and one `usb-redir` each.
 - **Interrupt IN is polled by vusb**, every 20 ms, not at the endpoint's
   `bInterval`; QEMU asks for it once and gets what arrives.
-- **No isochronous transfers yet**: a stream is refused with a STALL.
+- **Isochronous streams run on vusb's clock.** QEMU starts a stream once,
+  and vusb then offers the device a packet per service interval and sends
+  each on. The model still sees one call per interval.
 - **Timing in the guest is the guest's.** A model that counts the host's
   offers behaves as over USB/IP; what the guest's drivers do in between is
   as real as on hardware.

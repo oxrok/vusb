@@ -7,10 +7,13 @@
 //! - [`relay`]: a USB relay board, one HID feature report.
 //! - [`cdc_echo`]: a CDC-ACM serial port that sends back what it gets.
 //! - [`ftdi_loopback`]: an FTDI chip with its pins looped back.
+//! - [`uac_mic`]: a USB Audio microphone that hears a tone, on an
+//!   isochronous endpoint.
 
 pub mod cdc_echo;
 pub mod ftdi_loopback;
 pub mod relay;
+pub mod uac_mic;
 
 use crate::model::DeviceModel;
 use crate::{Error, Result};
@@ -20,6 +23,7 @@ pub const NAMES: &[(&str, &str)] = &[
     (cdc_echo::NAME, cdc_echo::ABOUT),
     (ftdi_loopback::NAME, ftdi_loopback::ABOUT),
     (relay::NAME, relay::ABOUT),
+    (uac_mic::NAME, uac_mic::ABOUT),
 ];
 
 /// Builds an example from its name and `key=value` options.
@@ -32,6 +36,7 @@ pub fn build(name: &str, options: &[(String, String)]) -> Result<Box<dyn DeviceM
         cdc_echo::NAME => cdc_echo::build(options),
         ftdi_loopback::NAME => ftdi_loopback::build(options),
         relay::NAME => relay::build(options),
+        uac_mic::NAME => uac_mic::build(options),
         other => Err(Error::Invalid(format!("no example named {other}"))),
     }
 }

@@ -91,6 +91,13 @@
 //!
 //! # Writing a model
 //!
+//! An isochronous endpoint has no handshake, so it has its own two
+//! methods: [`iso_in`](model::DeviceModel::iso_in) returns the packet
+//! of one service interval, or nothing, and
+//! [`iso_out`](model::DeviceModel::iso_out) takes one. A streaming
+//! model counts those calls for its time: [`examples::uac_mic`] sends
+//! 48 samples a call and never reads a clock.
+//!
 //! A model answers each transfer with [`Reply::Data`](model::Reply),
 //! [`Reply::Nak`](model::Reply) or [`Reply::Stall`](model::Reply), and
 //! never waits: asked for data it does not have, it answers NAK and
@@ -138,8 +145,8 @@
 //! protocol build and test on Linux, macOS and Windows. The `usbip`
 //! feature (on by default) holds the server and the attach path, and
 //! `control` (on by default, needs `usbip`) the session and its socket;
-//! neither is needed to write and unit test a model. Isochronous
-//! transfers, hubs and super speed are not supported yet.
+//! neither is needed to write and unit test a model. Hubs and super
+//! speed are not supported yet.
 //!
 //! The command line tools, `vusb` and `vusb-ctl`, are the `vusb-cli`
 //! crate; the control protocol is documented in the repository's

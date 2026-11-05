@@ -8,6 +8,15 @@
   `Builder::usbredir` and `vusb run --usbredir ADDRESS` select it;
   unplug, replug, reset and renumeration work as over USB/IP.
   `tools/qemu-check.sh` checks it in a real guest.
+- Isochronous transfers: `DeviceModel::iso_in` and `iso_out`, one call
+  per service interval; the bus completes an isochronous URB at once with
+  a status per packet (`IsoPacket`, `Status::Missed`); USB/IP carries the
+  packet descriptors and usbredir runs streams. `Urb::iso_packets` became
+  `Urb::iso`, the packets' lengths; `Completion` and `Transfer` carry the
+  packets.
+- `uac-mic`, an example USB Audio microphone that hears a tone: the
+  kernel's `snd-usb-audio` records it sample for sample, on the machine
+  (`tools/audio-check.sh`) and in a QEMU guest.
 - `Session::addr` returns an `Option`: there is no USB/IP server over
   usbredir. The socket types moved to `transport::socket`; `control`
   still exports `Address` and `ListenOptions`.

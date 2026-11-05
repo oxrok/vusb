@@ -22,7 +22,8 @@ sudo vusb cleanup               # the ports a killed run left attached
 
 `vusb run` exits with status 0, 2 when the host left the USB protocol or the
 device's own, and 1 on an error. The examples are a HID relay board, a CDC-ACM
-serial port that echoes, and an FTDI chip looped back; a product's own devices
+serial port that echoes, an FTDI chip looped back, and a USB Audio
+microphone that hears a tone; a product's own devices
 run from its own program, on the library's `Session`.
 
 ## vusb-ctl

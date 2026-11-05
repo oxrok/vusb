@@ -67,6 +67,15 @@ jobs:
         run: cargo build --workspace
       - if: steps.vhci.outputs.available == 'true'
         run: sudo -E sh tools/attach-check.sh
+      - if: steps.vhci.outputs.available == 'true'
+        name: Record from the microphone (isochronous)
+        run: |
+          sudo apt-get install -y alsa-utils
+          if sudo modprobe snd-usb-audio; then
+            sudo -E sh tools/audio-check.sh
+          else
+            echo "::warning::no snd-usb-audio for kernel $(uname -r): the audio check did not run"
+          fi
 
   qemu:
     # The device inside a guest: usbredir to QEMU's usb-redir device, the
@@ -79,7 +88,7 @@ jobs:
       - name: Install QEMU and dracut
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 dracut-core
+          sudo apt-get install -y qemu-system-x86 dracut-core alsa-utils
           sudo chmod a+r "/boot/vmlinuz-$(uname -r)"
           if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
           qemu-system-x86_64 -device help | grep usb-redir
@@ -87,6 +96,13 @@ jobs:
       - run: sh tools/qemu-check.sh cdc-echo
       - run: sh tools/qemu-check.sh ftdi-loopback
       - run: sh tools/qemu-check.sh hid-relay
+      - name: The microphone, an isochronous stream
+        run: |
+          if modinfo snd-usb-audio >/dev/null 2>&1; then
+            sh tools/qemu-check.sh uac-mic
+          else
+            echo "::warning::no snd-usb-audio for kernel $(uname -r): the guest cannot record"
+          fi
       - if: failure()
         name: What the guest and QEMU said
         run: |
