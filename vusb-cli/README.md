@@ -20,6 +20,9 @@ sudo vusb run hid-relay --attach --open-devices --control /tmp/relay.sock
 sudo vusb cleanup               # the ports a killed run left attached
 ```
 
+`--log FILE` keeps a transaction log, and `--log-format fixture` writes it in
+the format made for golden files, with `--log-digest-above N` for long data.
+
 `vusb run` exits with status 0, 2 when the host left the USB protocol or the
 device's own, and 1 on an error. The examples are a HID relay board, a CDC-ACM
 serial port that echoes, an FTDI chip looped back, a USB Audio

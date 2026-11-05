@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- A second transaction log format, `fixture`, beside the default: the
+  compact lines of recorded USB fixtures (`ctl_in 21 01 0300 0000 8 ->
+  4142`), nothing for a held transfer until it completes, data longer
+  than a limit as `@LEN:SHA256`, and bytes the host leaves undefined as
+  `xx`. `observer::fixture::Log` is the observer, on any writer, with
+  rules that change while it runs; `Builder::log_format`,
+  `Builder::log_rules`, `vusb run --log-format` and `--log-digest-above`,
+  and `format=` and `digest-above=` on the `log` command select it for a
+  session's own log. Isochronous transfers are a line with their
+  packets. `docs/log.md` describes both formats. The new `fixture`
+  feature, on by default, brings the `sha2` crate.
+
 ## 0.2.0 (2026-11-05)
 
 - usbredir, a second transport: `transport::usbredir::Server` serves the

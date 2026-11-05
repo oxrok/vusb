@@ -15,8 +15,14 @@ struct Server {
 
 impl Server {
     fn start() -> Server {
+        Server::start_with(&[])
+    }
+
+    /// With more arguments to `vusb run`.
+    fn start_with(more: &[&str]) -> Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_vusb"))
             .args(["run", "hid-relay", "--listen", "127.0.0.1:0", "--control", "127.0.0.1:0"])
+            .args(more)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -77,6 +83,38 @@ fn vusb_ctl_drives_a_running_device() {
 
     server.ok(&["quit"]);
     assert_eq!(server.child.wait().expect("vusb ends").code(), Some(0));
+}
+
+#[test]
+fn the_log_takes_a_format() {
+    let path = std::env::temp_dir().join(format!("vusb-cli-format-{}.log", std::process::id()));
+    let file = path.to_str().expect("a path in UTF-8");
+    let mut server = Server::start_with(&[
+        "--log",
+        file,
+        "--log-format",
+        "fixture",
+        "--log-digest-above",
+        "1024",
+    ]);
+    server.ok(&["section", "name=run"]);
+    server.ok(&["log", "format=plain", "digest-above=off"]);
+    server.ok(&["log", "format=fixture", "digest-above=16", "verbose=true"]);
+    let refused = server.ctl(&["log", "format=golden"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("plain and fixture"));
+    assert_eq!(server.ctl(&["log", "digest-above=some"]).status.code(), Some(1));
+    server.ok(&["quit"]);
+    assert_eq!(server.child.wait().expect("vusb ends").code(), Some(0));
+    let log = std::fs::read_to_string(&path).expect("the log is there");
+    assert!(log.starts_with("# section attach\n# section run\n"), "{log}");
+    std::fs::remove_file(&path).expect("the log goes");
+    let bad = Command::new(env!("CARGO_BIN_EXE_vusb"))
+        .args(["run", "hid-relay", "--listen", "127.0.0.1:0", "--log-format", "golden"])
+        .output()
+        .expect("vusb runs");
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("plain and fixture"));
 }
 
 #[test]

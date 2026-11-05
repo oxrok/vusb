@@ -49,6 +49,7 @@ use crate::bus::{Bus, Renumeration, Signal};
 use crate::control::{self, Accepted, Address, ListenOptions, Listener, MAX_LINE, Request};
 use crate::device::Device;
 use crate::model::{DeviceModel, Reply, Speed};
+use crate::observer::fixture::{self, Rules};
 use crate::observer::{Notice, Observer, SharedObserver, Transfer, hex};
 use crate::transport::usbip::Server;
 use crate::transport::usbredir;
@@ -63,6 +64,48 @@ type Handler = Box<dyn FnMut(&Value, &mut Ctx) -> Result<Value> + Send>;
 
 /// Called with every lifecycle event, on the session's thread.
 type Watcher = Box<dyn FnMut(&Value) + Send>;
+
+/// The format of the session's transaction log.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LogFormat {
+    /// A line per transfer as [`Transfer::line`] writes it, held
+    /// transfers included: `control a1 01 0300 0000 0008 -> 4142`.
+    #[default]
+    Plain,
+    /// The dialect of recorded USB fixtures, made to be compared with
+    /// golden files: `ctl_in 21 01 0300 0000 8 -> 4142`. See
+    /// [`fixture`].
+    Fixture,
+}
+
+impl LogFormat {
+    /// The format's name, as [`str::parse`] takes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            LogFormat::Plain => "plain",
+            LogFormat::Fixture => "fixture",
+        }
+    }
+}
+
+impl fmt::Display for LogFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for LogFormat {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<LogFormat> {
+        match s {
+            "plain" => Ok(LogFormat::Plain),
+            "fixture" => Ok(LogFormat::Fixture),
+            other => Err(Error::Invalid(format!("{other}: the log formats are plain and fixture"))),
+        }
+    }
+}
 
 /// The bus number announced by default (`0x7675` is "vu"); with the
 /// device number it forms the `devid` by which [`vhci::cleanup`] finds
@@ -95,6 +138,8 @@ pub struct Builder {
     open_devices: bool,
     log: Option<PathBuf>,
     log_dir: Option<PathBuf>,
+    log_format: LogFormat,
+    log_rules: Rules,
     verbose: bool,
     control: Vec<(Address, ListenOptions)>,
     usbredir: Option<(Address, ListenOptions)>,
@@ -117,6 +162,8 @@ impl Builder {
             open_devices: false,
             log: None,
             log_dir: None,
+            log_format: LogFormat::default(),
+            log_rules: Rules::default(),
             verbose: false,
             control: Vec::new(),
             usbredir: None,
@@ -178,6 +225,24 @@ impl Builder {
     #[must_use]
     pub fn log_dir(mut self, dir: Option<PathBuf>) -> Builder {
         self.log_dir = dir;
+        self
+    }
+
+    /// The format of the transaction log; [`LogFormat::Plain`] unless
+    /// set. The `log` command changes it while the session runs.
+    #[must_use]
+    pub fn log_format(mut self, format: LogFormat) -> Builder {
+        self.log_format = format;
+        self
+    }
+
+    /// The rules of a log in [`LogFormat::Fixture`]: what is written as
+    /// a digest, and which bytes the host leaves undefined. A program
+    /// whose rules change with the model keeps a
+    /// [`fixture::Log`] of its own instead, and sets them there.
+    #[must_use]
+    pub fn log_rules(mut self, rules: Rules) -> Builder {
+        self.log_rules = rules;
         self
     }
 
@@ -321,6 +386,8 @@ impl Builder {
         let hub = Arc::new(Mutex::new(Hub {
             subscribers: Vec::new(),
             log,
+            format: self.log_format,
+            rules: self.log_rules,
             verbose: self.verbose,
             violations: 0,
             section: String::new(),
@@ -516,6 +583,8 @@ struct Subscriber {
 struct Hub {
     subscribers: Vec<Subscriber>,
     log: Option<File>,
+    format: LogFormat,
+    rules: Rules,
     verbose: bool,
     violations: usize,
     section: String,
@@ -526,6 +595,19 @@ impl Hub {
         if let Some(f) = &mut self.log {
             let _ = writeln!(f, "{line}");
         }
+    }
+
+    /// With the log in the fixture dialect, hands what was seen to a
+    /// [`fixture::Log`] on the file, and says so: the plain format is
+    /// then not written.
+    fn fixture(&mut self, seen: impl FnOnce(&mut fixture::Log<&mut File>)) -> bool {
+        if self.format != LogFormat::Fixture {
+            return false;
+        }
+        if let Some(file) = &mut self.log {
+            seen(&mut fixture::Log::new(file, self.rules).verbose(self.verbose));
+        }
+        true
     }
 
     fn send(&mut self, wants: impl Fn(&Subscriber) -> bool, message: &Value) {
@@ -559,7 +641,9 @@ impl Hub {
 impl Observer for Hub {
     fn transfer(&mut self, t: &Transfer) {
         let line = t.line();
-        self.log_line(&line);
+        if !self.fixture(|log| log.transfer(t)) {
+            self.log_line(&line);
+        }
         let setup = t.setup.map(|s| {
             json!({
                 "request_type": s.request_type, "request": s.request,
@@ -583,15 +667,18 @@ impl Observer for Hub {
     fn violation(&mut self, message: &str) {
         self.violations += 1;
         eprintln!("violation [{}]: {message}", self.section);
-        self.log_line(&format!("! violation: {message}"));
+        if !self.fixture(|log| log.violation(message)) {
+            self.log_line(&format!("! violation: {message}"));
+        }
         let m = json!({"event": "violation", "section": self.section, "message": message});
         self.send(|s| s.violations, &m);
     }
 
     fn notice(&mut self, notice: Notice<'_>) {
+        let plain = !self.fixture(|log| log.notice(notice));
         match notice {
             Notice::Comment(c) => {
-                if self.verbose {
+                if plain && self.verbose {
                     self.log_line(&format!("# {c}"));
                 }
                 let m = json!({"event": "comment", "section": self.section, "message": c});
@@ -599,18 +686,23 @@ impl Observer for Hub {
             }
             Notice::Section(name) => {
                 name.clone_into(&mut self.section);
-                self.log_line(&format!("# section {name}"));
+                if plain {
+                    self.log_line(&format!("# section {name}"));
+                }
                 self.send(|s| s.events, &json!({"event": "section", "name": name}));
             }
             Notice::Renumeration { vendor, product } => {
-                self.log_line(&format!("renumeration {vendor:04x}:{product:04x}"));
+                if plain {
+                    self.log_line(&format!("renumeration {vendor:04x}:{product:04x}"));
+                }
                 let m = json!({
                     "event": "renumeration", "section": self.section,
                     "vendor": vendor, "product": product,
                 });
                 self.send(|s| s.events, &m);
             }
-            Notice::Fired(e) => self.log_line(e.word()),
+            Notice::Fired(e) if plain => self.log_line(e.word()),
+            Notice::Fired(_) => {}
         }
     }
 }
@@ -1092,18 +1184,44 @@ fn option_text(v: &Value) -> String {
 }
 
 fn log_command(args: &Value, ctx: &mut Ctx) -> Result<Value> {
-    if let Some(verbose) = args.get("verbose").and_then(Value::as_bool) {
-        ctx.hub.lock().expect("hub lock").verbose = verbose;
-    }
-    if args.get("off").and_then(Value::as_bool) == Some(true) {
-        ctx.hub.lock().expect("hub lock").log = None;
-        return Ok(json!({}));
+    // What is refused is refused before anything changes.
+    let format = arg_str(args, "format").map(str::parse::<LogFormat>).transpose()?;
+    let digest_above = match args.get("digest-above") {
+        None => None,
+        Some(Value::String(s)) if s == "off" => Some(None),
+        Some(n) => {
+            Some(Some(n.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| {
+                Error::Invalid(format!("digest-above={n}: a number of bytes, or off"))
+            })?))
+        }
+    };
+    let mut settings = format.is_some() || digest_above.is_some();
+    {
+        let mut hub = ctx.hub.lock().expect("hub lock");
+        if let Some(format) = format {
+            hub.format = format;
+        }
+        if let Some(above) = digest_above {
+            hub.rules.digest_above = above;
+        }
+        if let Some(verbose) = args.get("verbose").and_then(Value::as_bool) {
+            hub.verbose = verbose;
+            settings = true;
+        }
+        if args.get("off").and_then(Value::as_bool) == Some(true) {
+            hub.log = None;
+            return Ok(json!({}));
+        }
     }
     let Some(name) = arg_str(args, "file") else {
-        return if args.get("verbose").is_some() {
+        return if settings {
             Ok(json!({}))
         } else {
-            Err(Error::Invalid("log takes file=NAME, off=true or verbose=BOOL".into()))
+            Err(Error::Invalid(
+                "log takes file=NAME, off=true, verbose=BOOL, format=plain|fixture \
+                 or digest-above=N|off"
+                    .into(),
+            ))
         };
     };
     let Some(dir) = &ctx.log_dir else {
@@ -1281,7 +1399,8 @@ fn builtins(b: &mut Builder) {
     );
     add(
         "log",
-        "file=NAME starts a log in the log directory, off=true stops it, verbose=BOOL",
+        "file=NAME starts a log in the log directory, off=true stops it, verbose=BOOL, \
+         format=plain|fixture, digest-above=N|off (fixture: longer data as its digest)",
         Box::new(log_command),
     );
     add(
@@ -1634,6 +1753,57 @@ mod tests {
         assert_eq!(second, "control a1 01 0300 0000 0008 -> 4142434445000000\n");
         assert_eq!(std::fs::read(dir.join("taken")).unwrap(), b"keep");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_log_is_in_the_format_asked_for() {
+        let dir = std::env::temp_dir().join(format!("vusb-session-format-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fixture.log");
+        let mut r = start(
+            Builder::new(relay_factory())
+                .log(Some(path.clone()))
+                .log_format(LogFormat::Fixture)
+                .log_rules(Rules::digest_above(16)),
+        );
+        let mut s = r.device();
+        r.client.call("section", &json!({"name": "one"})).unwrap();
+        r.feature(&mut s, 2);
+        // The rules and the format change while it runs.
+        r.client.call("log", &json!({"digest-above": 4})).unwrap();
+        r.feature(&mut s, 3);
+        r.client.call("log", &json!({"format": "plain"})).unwrap();
+        r.feature(&mut s, 4);
+        r.client.call("log", &json!({"format": "fixture", "digest-above": "off"})).unwrap();
+        r.feature(&mut s, 5);
+        // What is refused changes nothing, not even the half it could.
+        for bad in [
+            json!({"format": "golden"}),
+            json!({"format": "plain", "digest-above": "many"}),
+            json!({"digest-above": -1}),
+        ] {
+            assert!(r.client.call("log", &bad).is_err(), "{bad}");
+        }
+        r.feature(&mut s, 6);
+        r.end();
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            log,
+            "# section attach\n\
+             ctl_out 00 09 0001 0000 - -> ok\n\
+             # section one\n\
+             ctl_in 21 01 0300 0000 8 -> 4142434445000000\n\
+             ctl_in 21 01 0300 0000 8 -> \
+             @8:c300361ae74b2fae5864684afc8dab8a19e4a431b02b93457424ffba180a0955\n\
+             control a1 01 0300 0000 0008 -> 4142434445000000\n\
+             ctl_in 21 01 0300 0000 8 -> 4142434445000000\n\
+             ctl_in 21 01 0300 0000 8 -> 4142434445000000\n"
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+        assert_eq!("fixture".parse::<LogFormat>().unwrap(), LogFormat::Fixture);
+        assert_eq!(LogFormat::default().to_string(), "plain");
+        assert!("Fixture".parse::<LogFormat>().is_err());
     }
 
     #[test]

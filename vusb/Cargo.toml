@@ -12,19 +12,22 @@ keywords = ["usb", "usbip", "emulation", "testing", "virtual-device"]
 categories = ["hardware-support", "development-tools::testing", "emulators"]
 
 [features]
-default = ["usbip", "usbredir", "control"]
+default = ["usbip", "usbredir", "control", "fixture"]
 # The USB/IP server and the vhci-hcd attach path.
 usbip = []
 # The usbredir server, for QEMU's usb-redir device.
 usbredir = []
 # Sessions and their control socket: JSON lines, from vusb-ctl or any client.
-control = ["usbip", "usbredir", "dep:serde_json"]
+control = ["usbip", "usbredir", "fixture", "dep:serde_json"]
+# The transaction log in the fixture dialect, with SHA-256 digests of long data.
+fixture = ["dep:sha2"]
 
 [package.metadata.docs.rs]
 all-features = true
 
 [dependencies]
 serde_json = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [lints]
 workspace = true

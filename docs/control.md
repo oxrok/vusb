@@ -43,13 +43,28 @@ command never overlaps a re-attach.
 | `unplug`, `replug` | | leaves the bus as a pulled cable does; comes back |
 | `arm` | `event=unplug` or `event=mark name=NAME`, and `when=in=EP:N`, `out=EP:N` or `model` | fires once at that point of the host's traffic |
 | `section` | `name=NAME` | what follows belongs to it, in the log and on the stream |
-| `log` | `file=NAME`, `off=true`, `verbose=BOOL` | the transaction log at run time |
+| `log` | `file=NAME`, `off=true`, `verbose=BOOL`, `format=plain\|fixture`, `digest-above=N\|off` | the transaction log at run time |
 | `subscribe`, `unsubscribe` | `topics`: `tx`, `violations`, `events`, `comments` | a live stream on this connection |
 | `sync` | | answers after every input taken before it, a renumeration included |
 | `quit` | | detaches the device and ends the session |
 
 The `events` topic carries `ready`, `renumerated`, `replugged`, `unplugged`, `fired`,
 `renumeration` and `section`.
+
+## The log
+
+`log file=NAME` starts a new log in the directory given with `--log-dir`, and
+`log off=true` stops the log. The other arguments change the log that runs, and
+those started later:
+
+- `verbose=BOOL`: comments too, such as connections and unlinks.
+- `format=plain` or `format=fixture`: the lines' format, from now on. `plain` is
+  the default. `fixture` is made to be compared with golden files.
+- `digest-above=N`: in the fixture format, data longer than N bytes is written as
+  its length and SHA-256. `digest-above=off` writes every byte again.
+
+Both formats are described in [log.md](log.md). The `line` of a `tx` event on a
+stream is always in the plain format.
 
 ## Faults
 

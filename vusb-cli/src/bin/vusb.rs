@@ -24,7 +24,8 @@ use clap::{Parser, Subcommand};
 use serde_json::Value;
 use vusb::attach::vhci;
 use vusb::control::{Address, ListenOptions};
-use vusb::session::{BUSNUM, Builder};
+use vusb::observer::fixture::Rules;
+use vusb::session::{BUSNUM, Builder, LogFormat};
 use vusb::{Result, examples, options};
 
 #[derive(Parser)]
@@ -90,6 +91,14 @@ struct Run {
     /// Where the `log` command may start new logs; without it, it cannot.
     #[arg(long)]
     log_dir: Option<PathBuf>,
+    /// The log's format: plain, or fixture, the dialect of recorded USB
+    /// fixtures (`ctl_in 21 01 0300 0000 8 -> 4142`).
+    #[arg(long, value_name = "FORMAT", default_value_t)]
+    log_format: LogFormat,
+    /// In the fixture format, data longer than N bytes is written as
+    /// its length and SHA-256.
+    #[arg(long, value_name = "N")]
+    log_digest_above: Option<usize>,
     /// Logs comments too (connections, held transfers, unlinks).
     #[arg(short, long)]
     verbose: bool,
@@ -152,6 +161,8 @@ fn serve(args: Run) -> Result<u8> {
         .open_devices(args.open_devices)
         .log(args.log)
         .log_dir(args.log_dir)
+        .log_format(args.log_format)
+        .log_rules(args.log_digest_above.map_or_else(Rules::default, Rules::digest_above))
         .verbose(args.verbose)
         .stdio(args.stdio)
         .watch(announce);

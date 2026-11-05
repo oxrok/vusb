@@ -138,7 +138,10 @@
 //! reply before the host cut it, and how it ended; every violation; and
 //! notices on the run. [`observer::Recorder`] keeps them for a test,
 //! and [`Transfer::line`](observer::Transfer::line) is one line of a
-//! transaction log.
+//! transaction log. [`observer::fixture::Log`] writes a log in a second
+//! format, made to be compared with golden files: long data as its
+//! SHA-256, nothing for a transfer until it completes. A session writes
+//! either ([`session::Builder::log_format`]).
 //!
 //! # Platforms and features
 //!
@@ -146,7 +149,8 @@
 //! protocol build and test on Linux, macOS and Windows. The `usbip`
 //! feature (on by default) holds the server and the attach path, and
 //! `control` (on by default, needs `usbip`) the session and its socket;
-//! neither is needed to write and unit test a model. Hubs and super
+//! neither is needed to write and unit test a model. `fixture` (on by
+//! default) is the second log format, and brings the `sha2` crate. Hubs and super
 //! speed are not supported yet.
 //!
 //! The command line tools, `vusb` and `vusb-ctl`, are the `vusb-cli`

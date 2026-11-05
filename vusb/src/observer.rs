@@ -9,7 +9,8 @@
 //! renumeration the model asks for, an armed event firing). An
 //! observer writes a transaction log, counts violations for an exit
 //! status, or streams the transfers to whoever watches; [`Recorder`]
-//! keeps them in memory, for tests.
+//! keeps them in memory, for tests, and [`fixture::Log`] writes a log
+//! in the dialect of recorded USB fixtures.
 //!
 //! # Examples
 //!
@@ -39,6 +40,9 @@
 //! Observers run under the host's device lock: they must not block,
 //! and whatever is slow (a socket, a file) gets the data through a
 //! channel.
+
+#[cfg(feature = "fixture")]
+pub mod fixture;
 
 use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex};
