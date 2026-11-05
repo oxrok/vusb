@@ -13,6 +13,8 @@
   session's own log. Isochronous transfers are a line with their
   packets. `docs/log.md` describes both formats. The new `fixture`
   feature, on by default, brings the `sha2` crate.
+- `session::Builder::observer`: an observer of the bus from the start, the
+  first attach included, for a program that keeps a log of its own.
 
 ## 0.2.0 (2026-11-05)
 

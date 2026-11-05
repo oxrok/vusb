@@ -145,6 +145,7 @@ pub struct Builder {
     usbredir: Option<(Address, ListenOptions)>,
     stdio: bool,
     watcher: Option<Watcher>,
+    observers: Vec<SharedObserver>,
     commands: BTreeMap<String, Command>,
 }
 
@@ -169,6 +170,7 @@ impl Builder {
             usbredir: None,
             stdio: false,
             watcher: None,
+            observers: Vec::new(),
             commands: BTreeMap::new(),
         };
         builtins(&mut b);
@@ -299,6 +301,16 @@ impl Builder {
         self
     }
 
+    /// An observer of the bus from the start, the first attach's
+    /// transfers included: a log in a format of the program's own, a
+    /// count, a check. Called in the order given, after the session's
+    /// own, under the bus's lock, so it must not block.
+    #[must_use]
+    pub fn observer(mut self, observer: SharedObserver) -> Builder {
+        self.observers.push(observer);
+        self
+    }
+
     /// A command, which runs on the session's thread like the built in
     /// ones; one of the same name is replaced.
     #[must_use]
@@ -377,7 +389,7 @@ impl Builder {
     /// # Errors
     ///
     /// When the model refuses its options, or a socket cannot be opened.
-    pub fn start(self) -> Result<Session> {
+    pub fn start(mut self) -> Result<Session> {
         let model = (self.factory)(&self.options)?;
         let log = match &self.log {
             Some(path) => Some(File::create(path)?),
@@ -393,7 +405,11 @@ impl Builder {
             section: String::new(),
         }));
         let shared: SharedObserver = hub.clone();
-        let bus = Arc::new(Mutex::new(Bus::new(Device::new(model)).with_observer(shared)));
+        let mut bus = Bus::new(Device::new(model)).with_observer(shared);
+        for observer in self.observers.drain(..) {
+            bus.add_observer(observer);
+        }
+        let bus = Arc::new(Mutex::new(bus));
         bus.lock().expect("bus lock").notice(Notice::Section("attach"));
 
         let (tx, rx) = mpsc::channel();
@@ -1523,6 +1539,23 @@ mod tests {
         // A refused option leaves the session as it was.
         assert_eq!(r.client.call("sync", &json!({})).unwrap(), json!({}));
         assert_eq!(r.end(), Report { violations: 0, lost: false });
+    }
+
+    #[test]
+    fn an_observer_sees_the_run_from_the_start() {
+        let recorder = Arc::new(Mutex::new(crate::observer::Recorder::default()));
+        let shared: SharedObserver = recorder.clone();
+        let mut r = start(Builder::new(relay_factory()).observer(shared));
+        let mut s = r.device();
+        r.feature(&mut s, 2);
+        r.client.call("section", &json!({"name": "run"})).unwrap();
+        r.feature(&mut s, 3);
+        drop(s);
+        r.end();
+        let seen = recorder.lock().unwrap();
+        assert_eq!(seen.notices[0], "section attach", "{:?}", seen.notices);
+        assert!(seen.notices.contains(&"section run".to_owned()), "{:?}", seen.notices);
+        assert_eq!(seen.transfers.len(), 3, "the configuration and two reads");
     }
 
     #[test]
