@@ -196,8 +196,10 @@ impl Udc {
     }
 }
 
-/// What the driver reports.
+/// What the driver reports. Only the Linux driver (`raw`) constructs
+/// these; elsewhere `open` refuses and no event is ever made.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum Event {
     /// Bound to the controller.
     Connect,
